@@ -206,7 +206,7 @@ def test_masked_layer_raises():
         _impl().forward_cuda(q, k, v, _Meta())
 
 
-def test_packed_metadata_bypasses_padding_mask(monkeypatch):
+def test_packed_metadata_trims_padding_mask(monkeypatch):
     b, s, h, d = 1, 8, 8, 128
     q, k, v = (torch.zeros(b, s, h, d) for _ in range(3))
     mask = torch.tensor([[True, True, True, True, True, True, False, False]])
@@ -233,12 +233,35 @@ def test_packed_metadata_bypasses_padding_mask(monkeypatch):
     out = _impl().forward_cuda(q, k, v, metadata)
 
     assert out.shape == q.shape
-    assert captured["batch_size"] == 2
-    assert captured["seq_lens"].tolist() == [6, 2]
-    assert captured["cum_seq_lens_q"] is cu_seqlens
-    assert captured["cum_seq_lens_kv"] is cu_seqlens
+    assert captured["query"].shape[0] == 6
+    assert captured["key"].shape[0] == 6
+    assert captured["value"].shape[0] == 6
+    assert captured["batch_size"] == 1
+    assert captured["seq_lens"].tolist() == [6]
+    assert captured["cum_seq_lens_q"].tolist() == [0, 6]
+    assert captured["cum_seq_lens_kv"].tolist() == [0, 6]
     assert captured["max_q_len"] == 6
     assert captured["max_kv_len"] == 6
+    assert torch.count_nonzero(out[:, 6:]) == 0
+
+
+def test_packed_metadata_rejects_non_prefix_mask(monkeypatch):
+    b, s, h, d = 1, 8, 8, 128
+    q, k, v = (torch.zeros(b, s, h, d) for _ in range(3))
+    cu_seqlens = torch.tensor([0, 6, 8], dtype=torch.int32)
+    metadata = AttentionMetadata(
+        attn_mask=torch.tensor([[True, True, False, True, True, True, False, False]]),
+        extra={
+            "cu_seqlens_q": cu_seqlens,
+            "cu_seqlens_k": cu_seqlens,
+            "max_seqlen_q": 6,
+            "max_seqlen_k": 6,
+        },
+    )
+    monkeypatch.setattr(tg, "HAS_FLASHINFER", True)
+
+    with pytest.raises(ValueError, match="prefix-valid"):
+        _impl().forward_cuda(q, k, v, metadata)
 
 
 def test_packed_metadata_must_be_complete():
@@ -378,12 +401,9 @@ def test_bf16_packed_padding_matches_sdpa():
 
     out = _impl().forward_cuda(q, k, v, metadata).float()
     ref_used = _sdpa_ref(q[:, :used], k[:, :used], v[:, :used], scale)
-    ref_padding = _sdpa_ref(q[:, used:], k[:, used:], v[:, used:], scale)
-
     used_rel = (out[:, :used] - ref_used).abs().mean() / ref_used.abs().mean()
-    padding_rel = (out[:, used:] - ref_padding).abs().mean() / ref_padding.abs().mean()
     assert used_rel < 0.01, f"BF16 packed valid-token rel err {used_rel:.4f} too high"
-    assert padding_rel < 0.01, f"BF16 packed padding rel err {padding_rel:.4f} too high"
+    assert torch.count_nonzero(out[:, used:]) == 0
 
 
 requires_sage = pytest.mark.skipif(
@@ -410,6 +430,47 @@ def test_sage_quant_matches_sdpa(dtype_qk):
     ref = _sdpa_ref(q, k, v, scale)
     rel = (out.float() - ref).abs().mean() / ref.abs().mean()
     assert rel < 0.1, f"SAGE({dtype_qk}) rel err {rel:.4f} too high"
+
+
+@requires_sage
+def test_sage_packed_non_aligned_length_matches_sdpa():
+    torch.manual_seed(0)
+    b, s, used, h, d = 1, 208, 194, 8, 128
+    scale = 1.0 / math.sqrt(d)
+    q, k, v = (torch.randn(b, s, h, d, device="cuda", dtype=torch.bfloat16) for _ in range(3))
+    cu_seqlens = torch.tensor([0, used, s], dtype=torch.int32, device="cuda")
+    metadata = AttentionMetadata(
+        attn_mask=torch.arange(s, device="cuda")[None] < used,
+        extra={
+            "cu_seqlens_q": cu_seqlens,
+            "cu_seqlens_k": cu_seqlens,
+            "max_seqlen_q": used,
+            "max_seqlen_k": used,
+        },
+    )
+
+    out = _impl(quant={"dtype_qk": "fp8_e4m3", "q_block_size": 1, "k_block_size": 16}).forward_cuda(q, k, v, metadata)
+    assert torch.isfinite(out).all()
+    ref = _sdpa_ref(q[:, :used], k[:, :used], v[:, :used], scale)
+    rel = (out[:, :used].float() - ref).abs().mean() / ref.abs().mean()
+    assert rel < 0.2, f"SAGE packed valid-token rel err {rel:.4f} too high"
+    assert torch.count_nonzero(out[:, used:]) == 0
+
+
+@requires_sage
+def test_sage_short_sequence_uses_dense_kernel():
+    torch.manual_seed(0)
+    b, s, h, d = 1, 14, 8, 128
+    scale = 1.0 / math.sqrt(d)
+    q, k, v = (torch.randn(b, s, h, d, device="cuda", dtype=torch.bfloat16) for _ in range(3))
+
+    impl = _impl(quant={"dtype_qk": "fp8_e4m3", "q_block_size": 1, "k_block_size": 16})
+    impl._sage_quantize_fn = lambda *args, **kwargs: pytest.fail("short sequence must not use SAGE")
+    out = impl.forward_cuda(q, k, v)
+    ref = _sdpa_ref(q, k, v, scale)
+    rel = (out.float() - ref).abs().mean() / ref.abs().mean()
+    assert torch.isfinite(out).all()
+    assert rel < 0.01, f"SAGE short-sequence dense fallback rel err {rel:.4f} too high"
 
 
 @requires_trtllm_attn

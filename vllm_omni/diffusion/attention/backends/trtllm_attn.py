@@ -286,6 +286,7 @@ class TrtllmAttentionImpl(AttentionImpl):
         q = query.reshape(physical_batch * q_len, num_q_heads, head_dim).contiguous()
         k = key.reshape(physical_batch * kv_len, num_kv_heads, head_dim).contiguous()
         v = value.reshape(physical_batch * kv_len, num_kv_heads, head_dim).contiguous()
+        output_tokens = q.shape[0]
 
         if has_packed_metadata:
             cu_seq_lens_q = extra["cu_seqlens_q"]
@@ -296,6 +297,34 @@ class TrtllmAttentionImpl(AttentionImpl):
                 raise ValueError("Packed TRTLLM attention requires matching non-empty Q and KV sequence batches")
             if int(cu_seq_lens_q[-1].item()) != q.shape[0] or int(cu_seq_lens_kv[-1].item()) != k.shape[0]:
                 raise ValueError("Packed TRTLLM attention cu_seqlens must cover all Q/K/V tokens")
+
+            # A packed prefix mask denotes structural suffix padding, not another
+            # document. Exclude it before quantization and attention; in particular,
+            # SAGE block quantization must not span the valid/padding boundary.
+            if attn_mask is not None:
+                if q.shape[0] != k.shape[0] or attn_mask.numel() != q.shape[0]:
+                    raise ValueError("Packed TRTLLM prefix masks require equal Q/K lengths")
+                flat_mask = attn_mask.reshape(-1).to(dtype=torch.bool)
+                valid_tokens = int(flat_mask.sum().item())
+                expected_mask = torch.arange(flat_mask.numel(), device=device) < valid_tokens
+                if not torch.equal(flat_mask, expected_mask):
+                    raise ValueError("TRTLLM_ATTN only supports prefix-valid packed attention masks")
+
+                q_boundary = (cu_seq_lens_q == valid_tokens).nonzero(as_tuple=False)
+                kv_boundary = (cu_seq_lens_kv == valid_tokens).nonzero(as_tuple=False)
+                if q_boundary.numel() != 1 or kv_boundary.numel() != 1:
+                    raise ValueError("Packed TRTLLM prefix length must be a Q/K sequence boundary")
+                q_end = int(q_boundary.item()) + 1
+                kv_end = int(kv_boundary.item()) + 1
+                if q_end != kv_end:
+                    raise ValueError("Packed TRTLLM prefix masks require matching Q/K sequence batches")
+
+                q = q[:valid_tokens]
+                k = k[:valid_tokens]
+                v = v[:valid_tokens]
+                cu_seq_lens_q = cu_seq_lens_q[:q_end].contiguous()
+                cu_seq_lens_kv = cu_seq_lens_kv[:kv_end].contiguous()
+
             batch = cu_seq_lens_q.numel() - 1
             seq_lens = (cu_seq_lens_kv[1:] - cu_seq_lens_kv[:-1]).to(dtype=torch.int32).contiguous()
             max_q_len = int(extra["max_seqlen_q"])
@@ -318,7 +347,10 @@ class TrtllmAttentionImpl(AttentionImpl):
         # SAGE quant is active (which already requires the kernel, checked at init) so the dense
         # path stays compatible with older builds that lack these parameters.
         sage_kwargs: dict = {}
-        if self.quant.enabled:
+        # The SAGE kernel requires every KV sequence to contain at least one full
+        # quantization block. Small auxiliary attention sites use the dense kernel.
+        use_sage = self.quant.enabled and bool(torch.all(seq_lens >= self.quant.k_block_size).item())
+        if use_sage:
             q, k, v, sage_attn_sfs, sage_block_sizes = self.quant.quantize(q, k, v, self._sage_quantize_fn)
             sage_kwargs["sage_attn_sfs"] = sage_attn_sfs
             sage_kwargs["num_elts_per_sage_attn_blk"] = sage_block_sizes
@@ -344,4 +376,12 @@ class TrtllmAttentionImpl(AttentionImpl):
             skip_softmax_threshold_scale_factor=_skip_factor,
             **sage_kwargs,
         )
+        if out.shape[0] != output_tokens:
+            padded_out = torch.zeros(
+                (output_tokens, num_q_heads, head_dim),
+                dtype=out.dtype,
+                device=out.device,
+            )
+            padded_out[: out.shape[0]] = out
+            out = padded_out
         return out.reshape(physical_batch, q_len, num_q_heads, head_dim)
