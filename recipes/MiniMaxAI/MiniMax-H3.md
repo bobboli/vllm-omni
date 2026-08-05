@@ -228,11 +228,26 @@ vllm serve "${MODEL}" \
   --vae-use-tiling
 ```
 
+Do not add `--enforce-eager` to this performance configuration. The first
+request includes regional compilation; warm the server once before measuring
+steady-state latency. H3 is CFG-distilled, so `--cfg-parallel-size` must remain
+1. The H3 VAE supports its native `tile` mode, not
+`spatial_shard_height` or `spatial_shard_width`.
+
+### TRTLLM attention
+
 On datacenter Blackwell GPUs, MiniMax H3 defaults to dense BF16
-`TRTLLM_ATTN`; no attention backend flag is required. Testing with this
-four-GPU profile shows that `TRTLLM_ATTN` outperforms FA4. Confirm the server
-log contains `Defaulting to diffusion attention backend TRTLLM_ATTN` before
-recording measurements.
+`TRTLLM_ATTN`; no attention backend flag is required. To select it explicitly,
+use:
+
+```bash
+--diffusion-attention-backend TRTLLM_ATTN
+```
+
+Testing with the four-GPU profile above shows that `TRTLLM_ATTN` outperforms
+FA4. Confirm the server log contains
+`Defaulting to diffusion attention backend TRTLLM_ATTN` before recording
+measurements when using the default selection.
 
 FA4 remains available by explicitly selecting the `FLASH_ATTN` backend:
 
@@ -242,14 +257,6 @@ FA4 remains available by explicitly selecting the `FLASH_ATTN` backend:
 
 On Blackwell, `FLASH_ATTN` selects FA4. Confirm the server log contains
 `Using CuTe FlashAttention-4 on Blackwell` before recording FA4 measurements.
-
-Do not add `--enforce-eager` to this performance configuration. The first
-request includes regional compilation; warm the server once before measuring
-steady-state latency. H3 is CFG-distilled, so `--cfg-parallel-size` must remain
-1. The H3 VAE supports its native `tile` mode, not
-`spatial_shard_height` or `spatial_shard_width`.
-
-### Additional TRTLLM attention optimizations
 
 `TRTLLM_ATTN` additionally supports two lossy optimizations for the long main
 DiT attention sequence: SAGE attention quantization and Skip-Softmax Sparse
