@@ -234,7 +234,7 @@ steady-state latency. H3 is CFG-distilled, so `--cfg-parallel-size` must remain
 1. The H3 VAE supports its native `tile` mode, not
 `spatial_shard_height` or `spatial_shard_width`.
 
-### TRTLLM attention
+### Attention Backends
 
 On datacenter Blackwell GPUs, MiniMax H3 defaults to dense BF16
 `TRTLLM_ATTN`; no attention backend flag is required. To select it explicitly,
