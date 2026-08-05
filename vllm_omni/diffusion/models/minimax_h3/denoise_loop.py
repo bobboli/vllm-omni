@@ -150,6 +150,7 @@ def minimax_h3_denoise_loop(
     imgvid_cond_noise_aug_for_inference: float = MINIMAX_H3_IMGVID_COND_TIMESTEP,
     audio_cond_noise_aug_for_inference: float = MINIMAX_H3_AUDIO_REF_COND_TIMESTEP,
     on_step: Callable[[int, torch.Tensor, torch.Tensor], None] | None = None,
+    on_step_start: Callable[[int, float, float], None] | None = None,
     step_profiler: Callable[[int], AbstractContextManager] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run the full denoise loop; returns final (video_rows, audio_rows).
@@ -206,6 +207,8 @@ def minimax_h3_denoise_loop(
             set_forward_context_denoise_step_idx(step)
             s_v, s_v_next = sigmas_video[step], sigmas_video[step + 1]
             s_a, s_a_next = sigmas_audio[step], sigmas_audio[step + 1]
+            if on_step_start is not None:
+                on_step_start(step, s_v, s_a)
             t_v, t_a = 1.0 - s_v, 1.0 - s_a
             imgvid_cond_t = max(t_v, float(imgvid_cond_noise_aug_for_inference))
             audio_ref_cond_t = max(t_a, float(audio_cond_noise_aug_for_inference))
