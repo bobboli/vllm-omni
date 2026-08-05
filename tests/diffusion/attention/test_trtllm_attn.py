@@ -143,6 +143,9 @@ def test_denoise_progress_mixin(monkeypatch):
     _Pipe().record_denoise_step(4)
     assert ctx.denoise_step_idx == 4 and ctx.denoise_timestep == pytest.approx(0.25)
 
+    _Pipe().record_denoise_step(5, normalized_timestep=0.7)
+    assert ctx.denoise_step_idx == 5 and ctx.denoise_timestep == pytest.approx(0.7)
+
 
 @pytest.mark.parametrize(
     "bk, field",
@@ -151,7 +154,6 @@ def test_denoise_progress_mixin(monkeypatch):
         ({"target_sparsity": -0.1}, "target_sparsity"),
         ({"disabled_until_timestep": 1.2}, "disabled_until_timestep"),
         ({"skip_softmax_threshold": -1.0}, "skip_softmax_threshold"),
-        ({"skip_softmax_threshold": 1.1}, "skip_softmax_threshold"),
         ({"target_sparsity": float("nan")}, "target_sparsity"),
         ({"skip_softmax_threshold": float("inf")}, "skip_softmax_threshold"),
     ],
@@ -493,7 +495,7 @@ def test_skip_threshold_engages():
     B, S, H, D = 2, 512, 8, 128
     q, k, v = (torch.randn(B, S, H, D, device="cuda", dtype=torch.bfloat16) for _ in range(3))
     dense = _impl().forward_cuda(q, k, v, None).float()
-    skipped = _impl(skip_softmax_threshold=1.0).forward_cuda(q, k, v, None).float()
+    skipped = _impl(skip_softmax_threshold=2.0).forward_cuda(q, k, v, None).float()
     assert torch.isfinite(skipped).all()
     assert (skipped - dense).abs().mean() / dense.abs().mean() > 0.02
 

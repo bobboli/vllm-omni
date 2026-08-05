@@ -139,7 +139,7 @@ Enable it through the typed `skip_softmax` block on the attention spec:
 | Key | Valid values | Meaning |
 |---|---|---|
 | `target_sparsity` | finite, `[0, 1]` | Operating point on a calibrated curve. Needs a calibration for the model. |
-| `threshold` | finite, `[0, 1]` | Direct threshold, no calibration needed. Mutually exclusive with `target_sparsity`. |
+| `threshold` | finite, `≥ 0` | Direct threshold, no calibration needed. Mutually exclusive with `target_sparsity`. |
 | `disabled_until_timestep` | finite, `[0, 1]` | Holds early, high-noise steps dense; skip turns on once the normalized timestep `t ≤ D`. |
 
 ```bash
