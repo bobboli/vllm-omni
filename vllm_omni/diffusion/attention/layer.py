@@ -116,6 +116,7 @@ class Attention(nn.Module):
             qkv_layout=qkv_layout,
             prefix=prefix,
             backend_kwargs=backend_kwargs,
+            role=role,
         )
         # Instantiate fallback backend for float32 support
         self.sdpa_fallback = SDPABackend.get_impl_cls()(

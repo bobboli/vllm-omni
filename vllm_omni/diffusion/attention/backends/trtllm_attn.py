@@ -180,6 +180,7 @@ class TrtllmAttentionImpl(AttentionImpl):
         prefix: str = "",
         qkv_layout: str | None = None,
         backend_kwargs: dict | None = None,
+        role: str = "self",
         **extra_impl_args,
     ) -> None:
         self.num_heads = num_heads
@@ -187,6 +188,7 @@ class TrtllmAttentionImpl(AttentionImpl):
         self.softmax_scale = softmax_scale
         self.causal = causal
         self.num_kv_heads = num_kv_heads if num_kv_heads is not None else num_heads
+        self.role = role
 
         self.skip = SkipSoftmaxConfig.from_backend_kwargs(backend_kwargs)
         self._warned_missing_timestep = False
@@ -360,6 +362,13 @@ class TrtllmAttentionImpl(AttentionImpl):
         # The SAGE kernel requires every KV sequence to contain at least one full
         # quantization block. Small auxiliary attention sites use the dense kernel.
         use_sage = self.quant.enabled and bool(torch.all(seq_lens >= self.quant.k_block_size).item())
+        if self.quant.enabled and not use_sage:
+            message = (
+                f"TRTLLM_ATTN SAGE quantization is configured for attention role {self.role!r}, but at least one "
+                f"KV sequence is shorter than k_block_size={self.quant.k_block_size}. Falling back to dense "
+                "attention for this input."
+            )
+            logger.warning_once(message)
         if use_sage:
             q, k, v, sage_attn_sfs, sage_block_sizes = self.quant.quantize(q, k, v, self._sage_quantize_fn)
             sage_kwargs["sage_attn_sfs"] = sage_attn_sfs
