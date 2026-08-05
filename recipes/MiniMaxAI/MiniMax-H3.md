@@ -233,6 +233,54 @@ steady-state latency. H3 is CFG-distilled, so `--cfg-parallel-size` must remain
 1. The H3 VAE supports its native `tile` mode, not
 `spatial_shard_height` or `spatial_shard_width`.
 
+### TRTLLM attention alternative
+
+On datacenter Blackwell, H3 can instead use `TRTLLM_ATTN`. Replace the FA4
+backend flag with:
+
+```bash
+--diffusion-attention-backend TRTLLM_ATTN
+```
+
+On datacenter Blackwell, dense BF16 `TRTLLM_ATTN` performance is on par with
+FA4.
+
+`TRTLLM_ATTN` additionally supports two lossy optimizations for the long main
+DiT attention sequence: SAGE attention quantization and Skip-Softmax Sparse
+Attention. SAGE quantizes Q/K to the configured dtype and V to FP8. This example uses
+`fp8_e4m3` for Q/K; B200 also supports `int8` Q/K. The TRTLLM SAGE path fixes V
+to FP8, so vLLM-Omni only exposes the Q/K dtype. The token refiner is a short
+attention path, so the `per_role` override leaves SAGE and Skip-Softmax disabled
+for it. The example enables the calibration-free Skip-Softmax path with
+`threshold=0.3`, after the normalized timestep reaches `0.9`:
+
+```bash
+--diffusion-attention-config '{
+  "default": {
+    "backend": "TRTLLM_ATTN",
+    "quant": {
+      "dtype_qk": "fp8_e4m3",
+      "q_block_size": 1,
+      "k_block_size": 16
+    },
+    "skip_softmax": {
+      "threshold": 0.3,
+      "disabled_until_timestep": 0.9
+    }
+  },
+  "per_role": {
+    "minimax_h3.token_refiner": {
+      "backend": "TRTLLM_ATTN"
+    }
+  }
+}'
+```
+
+For configuration details, see
+[TRTLLM_ATTN Backend and Skip-Softmax](https://github.com/vllm-project/vllm-omni/blob/main/docs/user_guide/diffusion/attention_backends.md#trtllm_attn-backend-and-skip-softmax)
+and
+[TRTLLM_ATTN SAGE Quantization](https://github.com/vllm-project/vllm-omni/blob/main/docs/user_guide/diffusion/attention_backends.md#trtllm_attn-sage-quantization).
+
 ### Text encoder tensor parallelism
 
 The Qwen3-VL text encoder (~51.5 GB in BF16 for the retained 50 layers) is by
