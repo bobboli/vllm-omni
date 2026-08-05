@@ -44,6 +44,13 @@ source .venv/bin/activate
 uv pip install -e .
 ```
 
+To keep FA4 available as an explicit option on Blackwell, install the
+FlashAttention-4 extra:
+
+```bash
+uv pip install -e '.[fa4]'
+```
+
 `ffmpeg` and `ffprobe` must be available on `PATH`. They are used for
 reference-video preparation and MP4 output.
 
@@ -226,6 +233,15 @@ On datacenter Blackwell GPUs, MiniMax H3 defaults to dense BF16
 four-GPU profile shows that `TRTLLM_ATTN` outperforms FA4. Confirm the server
 log contains `Defaulting to diffusion attention backend TRTLLM_ATTN` before
 recording measurements.
+
+FA4 remains available by explicitly selecting the `FLASH_ATTN` backend:
+
+```bash
+--diffusion-attention-backend FLASH_ATTN
+```
+
+On Blackwell, `FLASH_ATTN` selects FA4. Confirm the server log contains
+`Using CuTe FlashAttention-4 on Blackwell` before recording FA4 measurements.
 
 Do not add `--enforce-eager` to this performance configuration. The first
 request includes regional compilation; warm the server once before measuring
