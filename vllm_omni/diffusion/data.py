@@ -1427,7 +1427,7 @@ class SkipSoftmaxSpec:
 
     def __post_init__(self) -> None:
         self.target_sparsity = _in_range(self.target_sparsity, "skip_softmax.target_sparsity", 0.0, 1.0)
-        self.threshold = _in_range(self.threshold, "skip_softmax.threshold", 0.0, None)
+        self.threshold = _in_range(self.threshold, "skip_softmax.threshold", 0.0, 1.0)
         self.disabled_until_timestep = (
             _in_range(self.disabled_until_timestep, "skip_softmax.disabled_until_timestep", 0.0, 1.0) or 0.0
         )

@@ -40,7 +40,7 @@ class SkipSoftmaxConfig:
     def from_backend_kwargs(cls, backend_kwargs: dict | None) -> "SkipSoftmaxConfig":
         bk = backend_kwargs or {}
         return cls(
-            threshold=_validate_control(bk.get("skip_softmax_threshold"), "skip_softmax_threshold", 0.0, None),
+            threshold=_validate_control(bk.get("skip_softmax_threshold"), "skip_softmax_threshold", 0.0, 1.0),
             target_sparsity=_validate_control(bk.get("target_sparsity"), "target_sparsity", 0.0, 1.0),
             disabled_until_timestep=_validate_control(
                 bk.get("disabled_until_timestep", 0.0), "disabled_until_timestep", 0.0, 1.0
