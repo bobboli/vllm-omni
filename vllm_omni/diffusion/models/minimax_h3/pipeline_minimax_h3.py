@@ -1377,7 +1377,7 @@ class MiniMaxH3Pipeline(
                         step,
                         normalized_timestep=video_sigma,
                     ),
-                    on_step=lambda step, video, audio: progress.update(),
+                    on_step_end=lambda step, video, audio: progress.update(),
                 )
 
         target_video = video_rows[branch.update_mask_dev]
