@@ -298,6 +298,16 @@ class TrtllmAttentionImpl(AttentionImpl):
             if int(cu_seq_lens_q[-1].item()) != q.shape[0] or int(cu_seq_lens_kv[-1].item()) != k.shape[0]:
                 raise ValueError("Packed TRTLLM attention cu_seqlens must cover all Q/K/V tokens")
 
+            # Drop trailing empty sequences retained by packed producers when
+            # alignment adds no padding tokens.
+            while (
+                cu_seq_lens_q.numel() > 2
+                and int(cu_seq_lens_q[-1].item()) == int(cu_seq_lens_q[-2].item())
+                and int(cu_seq_lens_kv[-1].item()) == int(cu_seq_lens_kv[-2].item())
+            ):
+                cu_seq_lens_q = cu_seq_lens_q[:-1]
+                cu_seq_lens_kv = cu_seq_lens_kv[:-1]
+
             # A packed prefix mask denotes structural suffix padding, not another
             # document. Exclude it before quantization and attention; in particular,
             # SAGE block quantization must not span the valid/padding boundary.
