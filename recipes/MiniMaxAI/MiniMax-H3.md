@@ -41,7 +41,7 @@ B300/GB200 `FLASH_ATTN` profile:
 ```bash
 uv venv
 source .venv/bin/activate
-uv pip install -e '.[fa4]'
+uv pip install -e .
 ```
 
 `ffmpeg` and `ffprobe` must be available on `PATH`. They are used for
@@ -199,15 +199,13 @@ The best validated four-GPU configuration on four NVIDIA B300 GPUs is:
 - Ulysses sequence parallelism degree 4;
 - native tiled VAE patch parallelism degree 4;
 - regional `torch.compile` for the repeated DiT blocks;
-- CuTe FlashAttention-4 through the `FLASH_ATTN` backend, with Ring and TP
-  left at 1.
+- dense BF16 `TRTLLM_ATTN`, with Ring and TP left at 1.
 
 ```bash
 export MODEL="${MODEL_ROOT}/FL2VA"
 export PORT=8091
 
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
-FLASHINFER_DISABLE_VERSION_CHECK=1 \
 VLLM_WORKER_MULTIPROC_METHOD=spawn \
 VLLM_OMNI_VIDEO_SYNC_TIMEOUT=1800 \
 vllm serve "${MODEL}" \
@@ -220,12 +218,14 @@ vllm serve "${MODEL}" \
   --ring 1 \
   --vae-patch-parallel-size 4 \
   --vae-parallel-mode tile \
-  --vae-use-tiling \
-  --diffusion-attention-backend FLASH_ATTN
+  --vae-use-tiling
 ```
 
-On Blackwell, `FLASH_ATTN` selects FA4. Confirm the server log contains
-`Using CuTe FlashAttention-4 on Blackwell` before recording measurements.
+On datacenter Blackwell GPUs, MiniMax H3 defaults to dense BF16
+`TRTLLM_ATTN`; no attention backend flag is required. Testing with this
+four-GPU profile shows that `TRTLLM_ATTN` outperforms FA4. Confirm the server
+log contains `Defaulting to diffusion attention backend TRTLLM_ATTN` before
+recording measurements.
 
 Do not add `--enforce-eager` to this performance configuration. The first
 request includes regional compilation; warm the server once before measuring
@@ -233,17 +233,7 @@ steady-state latency. H3 is CFG-distilled, so `--cfg-parallel-size` must remain
 1. The H3 VAE supports its native `tile` mode, not
 `spatial_shard_height` or `spatial_shard_width`.
 
-### TRTLLM attention alternative
-
-On datacenter Blackwell, H3 can instead use `TRTLLM_ATTN`. Replace the FA4
-backend flag with:
-
-```bash
---diffusion-attention-backend TRTLLM_ATTN
-```
-
-On datacenter Blackwell, dense BF16 `TRTLLM_ATTN` performance is on par with
-FA4.
+### Additional TRTLLM attention optimizations
 
 `TRTLLM_ATTN` additionally supports two lossy optimizations for the long main
 DiT attention sequence: SAGE attention quantization and Skip-Softmax Sparse
@@ -295,7 +285,6 @@ export MODEL="${MODEL_ROOT}/FL2VA"
 export PORT=8091
 
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
-FLASHINFER_DISABLE_VERSION_CHECK=1 \
 VLLM_WORKER_MULTIPROC_METHOD=spawn \
 VLLM_OMNI_VIDEO_SYNC_TIMEOUT=1800 \
 vllm serve "${MODEL}" \
@@ -309,8 +298,7 @@ vllm serve "${MODEL}" \
   --text-encoder-tp-size 4 \
   --vae-patch-parallel-size 4 \
   --vae-parallel-mode tile \
-  --vae-use-tiling \
-  --diffusion-attention-backend FLASH_ATTN
+  --vae-use-tiling
 ```
 
 `N` must divide the Qwen3-VL head counts (64 attention heads / 8 KV heads), so
