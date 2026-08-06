@@ -244,10 +244,11 @@ use:
 --diffusion-attention-backend TRTLLM_ATTN
 ```
 
-Testing with the four-GPU profile above shows that `TRTLLM_ATTN` outperforms
-FA4. Confirm the server log contains
-`Defaulting to diffusion attention backend TRTLLM_ATTN` before recording
-measurements when using the default selection.
+Stable measurements with the four-GPU profile above put dense `TRTLLM_ATTN`
+and FA4 within 2% of each other. `TRTLLM_ATTN` remains the datacenter Blackwell
+default and enables the optional optimizations below. Confirm the server log
+contains `Defaulting to diffusion attention backend TRTLLM_ATTN` before
+recording measurements when using the default selection.
 
 FA4 remains available by explicitly selecting the `FLASH_ATTN` backend:
 
