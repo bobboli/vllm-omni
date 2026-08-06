@@ -259,14 +259,14 @@ FA4 remains available by explicitly selecting the `FLASH_ATTN` backend:
 On Blackwell, `FLASH_ATTN` selects FA4. Confirm the server log contains
 `Using CuTe FlashAttention-4 on Blackwell` before recording FA4 measurements.
 
-`TRTLLM_ATTN` additionally supports two lossy optimizations for the long main
+`TRTLLM_ATTN` additionally supports two **lossy** optimizations for the long main
 DiT attention sequence: SAGE attention quantization and Skip-Softmax Sparse
 Attention. SAGE quantizes Q/K to the configured dtype and V to FP8. This example uses
 `fp8_e4m3` for Q/K; B200 also supports `int8` Q/K. The TRTLLM SAGE path fixes V
 to FP8, so vLLM-Omni only exposes the Q/K dtype. The token refiner is a short
 attention path, so the `per_role` override leaves SAGE and Skip-Softmax disabled
 for it. The example enables the calibration-free Skip-Softmax path with
-`threshold=0.3`, after the normalized timestep reaches `0.9`:
+`threshold=0.05`, after the normalized timestep reaches `0.97`:
 
 ```bash
 --diffusion-attention-config '{
@@ -278,8 +278,8 @@ for it. The example enables the calibration-free Skip-Softmax path with
       "k_block_size": 16
     },
     "skip_softmax": {
-      "threshold": 0.3,
-      "disabled_until_timestep": 0.9
+      "threshold": 0.05,
+      "disabled_until_timestep": 0.97
     }
   },
   "per_role": {
