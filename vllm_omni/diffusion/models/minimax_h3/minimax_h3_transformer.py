@@ -35,6 +35,14 @@ from vllm_omni.diffusion.distributed.sp_plan import (
 )
 from vllm_omni.diffusion.layers.norm import RMSNorm
 from vllm_omni.diffusion.layers.rope import RotaryEmbedding
+from vllm_omni.platforms import current_omni_platform
+
+if current_omni_platform.is_cuda():
+    from vllm_omni.diffusion.models.minimax_h3.fused_qk_norm_rope import (
+        minimax_h3_rms_norm_rope,
+    )
+else:
+    minimax_h3_rms_norm_rope = None
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.base_config import (
@@ -429,7 +437,7 @@ class MiniMaxH3Attention(nn.Module):
         self,
         x: torch.Tensor,
         *,
-        rope_freqs: torch.Tensor | None,
+        rope_freqs: torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None,
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
         packed_total: int | None = None,
@@ -455,9 +463,15 @@ class MiniMaxH3Attention(nn.Module):
         q = q.view(total, self.num_heads, self.head_dim)
         k = k.view(total, self.num_kv_heads, self.head_dim)
         v = v.view(total, self.num_kv_heads, self.head_dim)
-        q = self.q_norm(q)
-        k = self.k_norm(k)
-        if rope_freqs is not None:
+        if isinstance(rope_freqs, tuple) and current_omni_platform.is_cuda():
+            assert minimax_h3_rms_norm_rope is not None
+            cos, sin = rope_freqs
+            q = minimax_h3_rms_norm_rope(q, self.q_norm.weight, cos, sin, self.q_norm.variance_epsilon)
+            k = minimax_h3_rms_norm_rope(k, self.k_norm.weight, cos, sin, self.k_norm.variance_epsilon)
+        else:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+        if isinstance(rope_freqs, torch.Tensor):
             q = self._apply_rope(q, rope_freqs)
             k = self._apply_rope(k, rope_freqs)
 
@@ -683,7 +697,7 @@ class MiniMaxH3DiTBlock(nn.Module):
         *,
         t_emb: torch.Tensor,
         combined_indices: torch.Tensor,
-        rope_freqs: torch.Tensor,
+        rope_freqs: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
         packed_total: int,
@@ -1151,14 +1165,23 @@ class MiniMaxH3DiTModel(nn.Module):
 
         hidden = decoder_input
         cu_seqlens = cu_seqlens.to(device)
-        block_rope = rope_freqs
+        block_rope_freqs = rope_freqs
         block_combined = combined_indices
 
-        hidden, block_rope, block_combined = self.sp_prepare(
+        hidden, block_rope_freqs, block_combined = self.sp_prepare(
             hidden,
-            block_rope,
+            block_rope_freqs,
             block_combined,
         )
+        if current_omni_platform.is_cuda():
+            rotary_half = block_rope_freqs.shape[-1] // 2
+            block_rope_half = block_rope_freqs[..., :rotary_half]
+            block_rope = (
+                torch.cos(block_rope_half).to(_BF16_DTYPE),
+                torch.sin(block_rope_half).to(_BF16_DTYPE),
+            )
+        else:
+            block_rope = block_rope_freqs
         for block in self.blocks:
             hidden = block(
                 hidden,
