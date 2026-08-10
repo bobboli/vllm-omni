@@ -157,6 +157,7 @@ class _ParallelConfigEngineOverrides(TypedDict, total=False):
     ring_degree: int
     allgather_degree: int
     ulysses_mode: str
+    async_ulysses: bool
     cfg_parallel_size: int
     vae_patch_parallel_size: int
     vae_parallel_mode: str
@@ -449,6 +450,7 @@ class OmniStageDiffusionParallelConfig(OmniStageParallelConfig):
     ring_degree: int = Field(default=1, ge=1)
     allgather_degree: int = Field(default=1, ge=1)
     ulysses_mode: str = "strict"
+    async_ulysses: bool = False
     cfg_parallel_size: int = Field(default=1, ge=1)
     vae_patch_parallel_size: int = Field(default=1, ge=1)
     text_encoder_tp_size: int = Field(default=1, ge=1)
@@ -466,6 +468,15 @@ class OmniStageDiffusionParallelConfig(OmniStageParallelConfig):
             raise ValueError("allgather_degree > 1 is mutually exclusive with ulysses_degree/ring_degree > 1")
         if self.ulysses_mode not in {"strict", "advanced_uaa"}:
             raise ValueError("ulysses_mode must be 'strict' or 'advanced_uaa'")
+        if self.async_ulysses:
+            if self.ulysses_degree <= 1:
+                raise ValueError("async_ulysses requires ulysses_degree > 1")
+            if self.ulysses_mode != "strict":
+                raise ValueError("async_ulysses currently requires ulysses_mode='strict'")
+            if self.ring_degree != 1:
+                raise ValueError("async_ulysses currently requires ring_degree=1")
+            if self.use_hsdp:
+                raise ValueError("async_ulysses does not currently support HSDP")
         if self.vae_parallel_mode not in {"tile", "spatial_shard_height", "spatial_shard_width"}:
             raise ValueError(
                 "vae_parallel_mode must be one of {'tile', 'spatial_shard_height', 'spatial_shard_width'}, "

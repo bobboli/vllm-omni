@@ -7,6 +7,7 @@
 # https://github.com/feifeibear/long-context-attention/blob/main/yunchang/attention/layer.py
 
 
+from collections.abc import Callable
 from dataclasses import replace
 
 import torch
@@ -139,7 +140,7 @@ class Attention(nn.Module):
         self.ring_pg = None
         self.ring_runner = None
 
-        if config is not None:
+        if config is not None and not skip_sequence_parallel:
             if config.parallel_config.ring_degree > 1:
                 self.use_ring = True
                 try:
@@ -153,14 +154,17 @@ class Attention(nn.Module):
                     self.use_ring = False
                     self.ring_runner = None
 
-        self.parallel_strategy = build_parallel_attention_strategy(
-            scatter_idx=scatter_idx,
-            gather_idx=gather_idx,
-            use_sync=use_sync,
-            causal=causal,
-        )
         # Fallback strategy when SP is not active (outside sharded regions)
         self._no_parallel_strategy = NoParallelAttention()
+        if skip_sequence_parallel:
+            self.parallel_strategy = self._no_parallel_strategy
+        else:
+            self.parallel_strategy = build_parallel_attention_strategy(
+                scatter_idx=scatter_idx,
+                gather_idx=gather_idx,
+                use_sync=use_sync,
+                causal=causal,
+            )
 
         self.layer_idx: int | None = _try_extract_layer_index(prefix)
 
@@ -185,6 +189,12 @@ class Attention(nn.Module):
             if not ctx.sp_active:
                 return self._no_parallel_strategy
         return self.parallel_strategy
+
+    @property
+    def qkv_compute_overlap_enabled(self) -> bool:
+        """Whether the active parallel strategy can pipeline Q/K/V producers."""
+        strategy = self._get_active_parallel_strategy()
+        return bool(getattr(strategy, "qkv_compute_overlap_enabled", False))
 
     def _init_kv_cache_quantization(self, config) -> None:
         if config is None:
@@ -279,12 +289,83 @@ class Attention(nn.Module):
     ) -> torch.Tensor:
         # Get the appropriate parallel strategy based on SP active state
         strategy = self._get_active_parallel_strategy()
+        if getattr(strategy, "qkv_compute_overlap_enabled", False):
+            raise RuntimeError(
+                "async_ulysses requires the model attention site to provide staged "
+                "Q/K/V producers through forward_from_qkv_producers()"
+            )
 
         # 1. Prepare inputs (Communication / Resharding)
         # For Ulysses: AllToAll Q/K/V; Slicing joint_q/k/v
         # For Ring: Concat joint_q
         query, key, value, attn_metadata, ctx = strategy.pre_attention(query, key, value, attn_metadata)
 
+        return self._forward_prepared(query, key, value, attn_metadata, strategy, ctx)
+
+    def forward_from_qkv_producers(
+        self,
+        *,
+        compute_query: Callable[[], torch.Tensor],
+        compute_key: Callable[[], torch.Tensor],
+        compute_value: Callable[[], torch.Tensor],
+        attn_metadata: AttentionMetadata | None = None,
+    ) -> torch.Tensor:
+        """Run attention while a parallel strategy pipelines Q/K/V production.
+
+        Models that can stage Q/K/V preparation can use this entry point
+        without coupling their scheduling to an attention kernel backend.
+        Strategies without producer overlap evaluate Q/K/V normally and reuse
+        the synchronous path. Both paths evaluate producers in V, Q, K order.
+        """
+        strategy = self._get_active_parallel_strategy()
+        prepare = getattr(strategy, "pre_attention_from_qkv_producers", None)
+        if prepare is None or not getattr(strategy, "qkv_compute_overlap_enabled", False):
+            value = compute_value()
+            query = compute_query()
+            key = compute_key()
+            return self._forward_impl(
+                query,
+                key,
+                value,
+                attn_metadata,
+            )
+
+        query, key, value, attn_metadata, ctx = prepare(
+            compute_query=compute_query,
+            compute_key=compute_key,
+            compute_value=compute_value,
+            attn_metadata=attn_metadata,
+        )
+        return self._forward_prepared_compile_boundary(
+            query,
+            key,
+            value,
+            attn_metadata,
+            strategy,
+            ctx,
+        )
+
+    @torch.compiler.disable
+    def _forward_prepared_compile_boundary(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: AttentionMetadata | None,
+        strategy,
+        ctx,
+    ) -> torch.Tensor:
+        return self._forward_prepared(query, key, value, attn_metadata, strategy, ctx)
+
+    def _forward_prepared(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: AttentionMetadata | None,
+        strategy,
+        ctx,
+    ) -> torch.Tensor:
         attn_metadata = self._with_kv_cache_dtype(attn_metadata)
 
         # 2. Kernel Execution (Computation)

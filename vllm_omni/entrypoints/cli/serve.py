@@ -499,6 +499,12 @@ class OmniServeCommand(CLISubcommand):
             "'advanced_uaa' enables the experimental UAA path for uneven sequence/head shapes.",
         )
         omni_config_group.add_argument(
+            "--async-ulysses",
+            action="store_true",
+            default=False,
+            help=("Overlap strict Ulysses Q/K/V all-to-all with staged preparation using CUDA Copy Engines."),
+        )
+        omni_config_group.add_argument(
             "--ring",
             "--ring-degree",
             dest="ring_degree",

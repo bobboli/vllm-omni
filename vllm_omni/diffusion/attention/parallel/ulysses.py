@@ -10,7 +10,7 @@ import torch.distributed as dist
 import torch.nn.functional as F
 
 from vllm_omni.diffusion.attention.backends.abstract import AttentionMetadata
-from vllm_omni.diffusion.attention.parallel.base import ParallelAttentionContext
+from vllm_omni.diffusion.attention.parallel.base import ParallelAttentionContext, QKVProducer
 from vllm_omni.diffusion.distributed.comm import SeqAllToAll4D
 from vllm_omni.diffusion.distributed.group_coordinator import SequenceParallelGroupCoordinator
 from vllm_omni.diffusion.forward_context import get_ulysses_mode
@@ -181,12 +181,26 @@ class UlyssesParallelAttention:
         scatter_idx: int,
         gather_idx: int,
         use_sync: bool,
+        async_ulysses: bool = False,
     ) -> None:
         self._sp_group = sp_group
         self._ulysses_pg = sp_group.ulysses_group
         self._scatter_idx = scatter_idx
         self._gather_idx = gather_idx
         self._use_sync = use_sync
+        self._async_ulysses = async_ulysses
+        self._async_exchange = None
+        if async_ulysses:
+            if use_sync:
+                raise ValueError("async_ulysses requires use_sync=False")
+            if scatter_idx != 2 or gather_idx != 1:
+                raise ValueError(
+                    "async_ulysses requires scatter_idx=2 and gather_idx=1 "
+                    f"(got scatter_idx={scatter_idx}, gather_idx={gather_idx})"
+                )
+            if sp_group.ring_world_size > 1:
+                raise ValueError("async_ulysses does not support hybrid Ulysses+Ring")
+            self._async_exchange = sp_group.get_async_ulysses_exchange()
 
     @property
     def enabled(self) -> bool:
@@ -195,6 +209,71 @@ class UlyssesParallelAttention:
     @property
     def name(self) -> str:
         return "ulysses"
+
+    @property
+    def qkv_compute_overlap_enabled(self) -> bool:
+        return self._async_ulysses
+
+    def pre_attention_from_qkv_producers(
+        self,
+        *,
+        compute_query: QKVProducer,
+        compute_key: QKVProducer,
+        compute_value: QKVProducer,
+        attn_metadata: AttentionMetadata | None,
+    ):
+        """Pipeline V/Q/K production with strict Ulysses input exchange."""
+        if not self._async_ulysses:
+            return self.pre_attention(
+                compute_query(),
+                compute_key(),
+                compute_value(),
+                attn_metadata,
+            )
+        if get_ulysses_mode(default="strict") != "strict":
+            raise ValueError("async_ulysses currently requires ulysses_mode='strict'")
+        if attn_metadata is not None and any(
+            tensor is not None
+            for tensor in (
+                attn_metadata.joint_query,
+                attn_metadata.joint_key,
+                attn_metadata.joint_value,
+            )
+        ):
+            raise ValueError("async_ulysses does not yet support joint attention tensors")
+
+        exchange = self._async_exchange
+        assert exchange is not None
+        try:
+            value_handle = exchange.issue(compute_value())
+            query_handle = exchange.issue(compute_query())
+            key_handle = exchange.issue(compute_key())
+            query, key, value = exchange.join((query_handle, key_handle, value_handle))
+        except Exception as error:
+            try:
+                exchange.abort()
+            except Exception as abort_error:
+                error.add_note(f"async Ulysses cleanup also failed: {abort_error!r}")
+            raise
+
+        if attn_metadata is not None and attn_metadata.attn_mask is not None:
+            mask = attn_metadata.attn_mask
+            if mask.ndim == 2:
+                if mask.shape[1] != query.shape[1]:
+                    raise ValueError(
+                        "async_ulysses attention mask must describe the global sequence: "
+                        f"mask length {mask.shape[1]} != sequence length {query.shape[1]}"
+                    )
+                attn_metadata.attn_mask = mask.bool().contiguous()
+
+        ctx = _UlyssesCtx(
+            name=self.name,
+            ulysses_pg=self._ulysses_pg,
+            scatter_idx=self._scatter_idx,
+            gather_idx=self._gather_idx,
+            use_sync=self._use_sync,
+        )
+        return query, key, value, attn_metadata, ctx
 
     def pre_attention(
         self,

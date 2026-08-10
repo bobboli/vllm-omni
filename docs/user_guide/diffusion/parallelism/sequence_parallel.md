@@ -65,6 +65,35 @@ omni = Omni(
 )
 ```
 
+### Overlap Q/K/V Preparation with Ulysses
+
+Models that can stage Q/K/V preparation can start each input exchange as soon
+as its tensor is ready, then overlap it with preparation of the next tensor.
+Enable this path with `async_ulysses=True`:
+
+```python
+omni = Omni(
+    model="MiniMaxAI/MiniMax-H3",
+    parallel_config=DiffusionParallelConfig(
+        ulysses_degree=4,
+        async_ulysses=True,
+    ),
+)
+```
+
+The asynchronous path uses CUDA symmetric-memory peer copies on a side stream.
+It overlaps only the input Q/K/V exchanges; the output Ulysses exchange remains
+a standard collective. It currently requires all of the following:
+
+- a single node where every worker exposes every participating NVIDIA GPU and
+  every pair of those GPUs has CUDA peer access;
+- strict Ulysses with `ring_degree=1` and HSDP disabled;
+- equal Q/K/V shapes and no joint-attention tensors; and
+- a model integration that supplies staged Q/K/V producers. MiniMax H3 keeps
+  its fused QKV projection, then overlaps V and Q exchange with Q/K
+  normalization and RoPE. Producers, exchange calls, and joined-output
+  consumers must remain ordered on one CUDA compute stream.
+
 ### Alternative Methods
 
 **Ring-Attention** (better for very long sequences):
@@ -139,6 +168,12 @@ vllm serve Qwen/Qwen-Image --omni --port 8091 --usp 2
 vllm serve Tongyi-MAI/Z-Image-Turbo --omni --port 8091 --usp 4 --ulysses-mode advanced_uaa
 ```
 
+**Ulysses-SP with Q/K/V overlap:**
+
+```bash
+vllm serve MiniMaxAI/MiniMax-H3 --omni --port 8091 --usp 4 --async-ulysses
+```
+
 **Ring-Attention:**
 
 ```bash
@@ -163,7 +198,8 @@ In `DiffusionParallelConfig`:
 |-----------|------|---------|-------------|
 | `ulysses_degree` | int | 1 | Number of GPUs for Ulysses-SP. Uses all-to-all communication. |
 | `ring_degree` | int | 1 | Number of GPUs for Ring-Attention. Uses P2P ring communication. |
-| `ulysses_mode` | str | `"default"` | Ulysses attention mode. Set to `"advanced_uaa"` to handle arbitrary sequence lengths and head counts without padding. |
+| `ulysses_mode` | str | `"strict"` | Ulysses attention mode. Set to `"advanced_uaa"` to handle arbitrary sequence lengths and head counts without padding. |
+| `async_ulysses` | bool | `False` | Overlap staged Q/K/V preparation with strict Ulysses input exchange. |
 
 **Notes:**
 - Total sequence parallel size equals to `ulysses_degree × ring_degree`

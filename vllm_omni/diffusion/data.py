@@ -190,6 +190,13 @@ class DiffusionParallelConfig:
       sequence shapes across the ring group.
     """
 
+    async_ulysses: bool = False
+    """Overlap Ulysses Q/K/V all-to-all with staged Q/K/V preparation.
+
+    This uses CUDA symmetric-memory peer copies on a side stream and currently
+    supports strict, single-node Ulysses without Ring parallelism.
+    """
+
     cfg_parallel_size: int = 1
     """Number of ranks used to execute guidance passes in parallel."""
 
@@ -269,6 +276,11 @@ class DiffusionParallelConfig:
         assert self.ulysses_mode in {"strict", "advanced_uaa"}, (
             f"ulysses_mode must be one of {{'strict','advanced_uaa'}}, but got {self.ulysses_mode!r}."
         )
+        if self.async_ulysses:
+            assert self.ulysses_degree > 1, "async_ulysses requires ulysses_degree > 1"
+            assert self.ulysses_mode == "strict", "async_ulysses currently requires ulysses_mode='strict'"
+            assert self.ring_degree == 1, "async_ulysses currently requires ring_degree=1"
+            assert not self.use_hsdp, "async_ulysses does not currently support HSDP"
 
         # Validate HSDP configuration
         if self.use_hsdp:

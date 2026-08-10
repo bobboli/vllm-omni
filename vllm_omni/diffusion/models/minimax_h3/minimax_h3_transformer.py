@@ -383,23 +383,20 @@ class MiniMaxH3Attention(nn.Module):
         return torch.cat((x_rot, x_pass), dim=-1)
 
     @torch.compiler.disable
-    def _run_packed_attention(
+    def _build_packed_attention_metadata(
         self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
         *,
+        device: torch.device,
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
         packed_total: int,
         video_layout: VideoTokenLayout | None = None,
-    ) -> torch.Tensor:
-        """Run packed attention as a small eager island.
+    ) -> AttentionMetadata:
+        """Build scalar-dependent packed metadata in a small eager island.
 
-        The scalar packed-layout metadata and backend-specific attention
-        kernels are intentionally opaque to Dynamo. Keeping this boundary
-        narrow lets regional compile fuse projections, norms, RoPE, and the
-        surrounding DiT block without repeated graph breaks.
+        Keeping Q/K/V producers outside this boundary allows their compute to
+        overlap Ulysses communication while the scalar packed-layout logic
+        remains opaque to Dynamo.
         """
         # max_seqlen is already the first (real) packed document length. Do
         # not read the CUDA cu_seqlens scalars here: this function runs once
@@ -421,8 +418,8 @@ class MiniMaxH3Attention(nn.Module):
             or self.attention.attn_backend.supports_packed_mask_free()
         )
         if used < packed_total and not no_mask:
-            attn_mask = torch.arange(packed_total, device=q.device)[None] < used
-        metadata = AttentionMetadata(
+            attn_mask = torch.arange(packed_total, device=device)[None] < used
+        return AttentionMetadata(
             attn_mask=attn_mask,
             extra={
                 "cu_seqlens_q": cu_seqlens,
@@ -440,6 +437,27 @@ class MiniMaxH3Attention(nn.Module):
                 # backend/path.
                 "laser_input_scale": MINIMAX_H3_LASER_INPUT_SCALE,
             },
+            video_layout=video_layout,
+        )
+
+    @torch.compiler.disable
+    def _run_packed_attention(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        *,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+        packed_total: int,
+        video_layout: VideoTokenLayout | None = None,
+    ) -> torch.Tensor:
+        """Run a materialized Q/K/V packed attention call eagerly."""
+        metadata = self._build_packed_attention_metadata(
+            device=q.device,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+            packed_total=packed_total,
             video_layout=video_layout,
         )
         return self.attention(
@@ -463,7 +481,9 @@ class MiniMaxH3Attention(nn.Module):
         """x: [T, hidden] packed thd rows -> [T, hidden].
 
         Operation order: fused qkv projection -> per-head q/k RMSNorm -> RoPE
-        on q/k -> variable-length non-causal flash attention -> output projection.
+        on q/k -> variable-length non-causal flash attention -> output
+        projection. Async Ulysses keeps the fused projection and pipelines the
+        V/Q/K exchange with Q/K postprocessing.
 
         With Ulysses sequence parallelism, x holds this rank's row shard;
         qkv/norm/RoPE run locally, an all-to-all trades sequence for heads.
@@ -472,6 +492,46 @@ class MiniMaxH3Attention(nn.Module):
         all-to-all restores the row shard before the output projection.
         """
         total = x.shape[0]
+        packed_length = packed_total if packed_total is not None else total
+
+        if self.attention.qkv_compute_overlap_enabled:
+            qkv, _ = self.qkv_proj(x)
+            q_size = self.num_heads * self.head_dim
+            kv_size = self.num_kv_heads * self.head_dim
+            query, key, value = qkv.split([q_size, kv_size, kv_size], dim=-1)
+
+            def compute_value() -> torch.Tensor:
+                return value.view(total, self.num_kv_heads, self.head_dim).unsqueeze(0)
+
+            def compute_query() -> torch.Tensor:
+                normalized = self.q_norm(query.view(total, self.num_heads, self.head_dim))
+                if rope_freqs is not None:
+                    normalized = self._apply_rope(normalized, rope_freqs)
+                return normalized.unsqueeze(0)
+
+            def compute_key() -> torch.Tensor:
+                normalized = self.k_norm(key.view(total, self.num_kv_heads, self.head_dim))
+                if rope_freqs is not None:
+                    normalized = self._apply_rope(normalized, rope_freqs)
+                return normalized.unsqueeze(0)
+
+            metadata = self._build_packed_attention_metadata(
+                device=x.device,
+                cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen,
+                packed_total=packed_length,
+                video_layout=video_layout,
+            )
+            out = self.attention.forward_from_qkv_producers(
+                compute_query=compute_query,
+                compute_key=compute_key,
+                compute_value=compute_value,
+                attn_metadata=metadata,
+            ).squeeze(0)
+            out = out.reshape(total, self.num_heads * self.head_dim)
+            out, _ = self.out_proj(out)
+            return out
+
         qkv, _ = self.qkv_proj(x)
         q_size = self.num_heads * self.head_dim
         kv_size = self.num_kv_heads * self.head_dim
@@ -497,7 +557,7 @@ class MiniMaxH3Attention(nn.Module):
             # Before Ulysses, q contains only this rank's row shard. The
             # backend receives the global sequence after all-to-all, so carry
             # its Python length explicitly instead of inferring it from q.
-            packed_total=packed_total if packed_total is not None else q.shape[0],
+            packed_total=packed_length,
             video_layout=video_layout,
         )
         out = out.reshape(total, self.num_heads * self.head_dim)

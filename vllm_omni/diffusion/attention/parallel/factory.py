@@ -47,6 +47,7 @@ def build_parallel_attention_strategy(
     ulysses_degree = getattr(p, "ulysses_degree", 1)
     ring_degree = getattr(p, "ring_degree", 1)
     allgather_degree = getattr(p, "allgather_degree", 1)
+    async_ulysses = getattr(p, "async_ulysses", False)
 
     try:
         sp_group = get_sp_group()
@@ -83,6 +84,7 @@ def build_parallel_attention_strategy(
             scatter_idx=scatter_idx,
             gather_idx=gather_idx,
             use_sync=use_sync,
+            async_ulysses=async_ulysses,
         )
 
     # Pure Ring Attention
