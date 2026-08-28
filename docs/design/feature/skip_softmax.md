@@ -20,62 +20,69 @@ opt-in and off by default.
 
 ## The online-softmax pass
 
-Attention is computed in a single streaming pass over the keys, in tiles of 128. Per query row the
-kernel maintains three running values:
+Attention is computed in a single streaming pass over KV tiles. Per query row the kernel maintains
+three running values:
 
 - `m` — the largest score seen so far,
 - `l` — the running denominator `Σ exp(sⱼ − m)`,
 - `O` — the running numerator `Σ exp(sⱼ − m)·vⱼ`,
 
-and returns `O / l` at the end. For each key tile it computes the tile's scores `Q · K_jᵀ · scale`,
-updates `m`, and accumulates that tile's contribution into `l` and `O`. Rescaling `l` and `O` when
-`m` grows keeps the single pass numerically exact.
+and returns `O / l` at the end. For each KV tile it computes the scores `QK_j^T`, updates `m`, and
+accumulates the tile's contribution into `l` and `O`. Rescaling `l` and `O` when `m` grows keeps the
+dense online-softmax pass numerically exact.
 
 ## The skip test
 
-Once a tile's scores are known, its largest score `tile_max` is compared against the running
-maximum:
+Once a tile's scores are known, its largest score `tile_max` is compared with the running maximum.
+Let `λ` be the effective threshold:
 
 ```text
-if exp(tile_max − running_max) < threshold:
-    skip this tile          # do not compute its softmax weights or its P·V accumulation
+if exp(tile_max - running_max) < λ:
+    skip this tile          # do not compute its Softmax or PV contribution
 ```
 
 `exp(tile_max − running_max)` is an upper bound on the softmax weight any key in the tile can
 receive: if even the tile's best key is far below the current maximum, every key in the tile is
-negligible, and both the softmax (the exponentials) and the `P·V` accumulation for that tile can be
-dropped. The tile's contribution to `l` and `O` is simply skipped.
+unimportant, and both the Softmax and `PV` work for that tile can be skipped. A larger `λ` makes the
+test more aggressive.
 
 ## What this bounds
 
 Two properties of the test shape the achievable speedup:
 
 - **`Q · K_jᵀ` always runs.** The test needs `tile_max`, which comes from the tile's scores, so the
-  score matmul is never skipped — only the softmax and the `P·V` accumulation are. The score matmul
-  and the value matmul are comparable in cost, so skipping every eligible tile removes at most
-  roughly half the attention work; the kernel-level speedup is bounded well under 2×, not unbounded.
+  score matmul is never skipped — only the Softmax and `PV` work are. Skip-Softmax therefore cannot
+  remove all attention computation.
 
 - **The decision is per tile, not per key.** A tile is skipped only when *all* of its keys are
-  collectively negligible; a single important key keeps the whole tile. How many tiles actually
-  qualify depends on the data and rounds down to tile granularity, so `target_sparsity` selects an
-  operating point on a calibrated curve — it is not a promise that a fixed fraction of tiles is
-  skipped.
+  collectively unimportant; a single important key keeps the whole tile. How many tiles qualify
+  depends on the attention scores and rounds down to tile granularity.
 
-## The threshold
+## Configuring the threshold
 
-The per-tile threshold is normalized by sequence length:
+vLLM-Omni provides two mutually exclusive ways to obtain `λ`.
+
+With a direct `threshold`:
 
 ```text
-threshold = factor / seqlen
+λ = skip_softmax.threshold
 ```
 
-`factor` comes from one of two sources:
+This path does not require calibration. `threshold=0` skips no tiles, and increasing the value makes
+the test more aggressive. Values from `0` to `1` are the meaningful operating range because the
+left-hand side of the skip test is in `(0, 1]`. The backend applies the sequence-length conversion
+required by FlashInfer internally; users should not scale `threshold` themselves.
 
-- **Calibrated** — `factor = a · exp(b · target_sparsity)`, where `a` and `b` are fit per model (and
-  per expert, for a multi-expert model) so that a given `target_sparsity` lands near that fraction of
-  skipped tiles on the calibration data.
-- **Direct** — `factor = skip_softmax.threshold · seqlen`, the calibration-free path; the user sets
-  the threshold themselves.
+With `target_sparsity=s`, checkpoint calibration supplies coefficients `a` and `b`:
+
+```text
+λ = a * exp(b * s) / sequence_length
+```
+
+The coefficients map the requested sparsity to a threshold fitted on calibration data. The achieved
+sparsity can differ for another prompt, shape, or layer, so `target_sparsity` selects a calibrated
+operating point rather than enforcing an exact skip ratio. A checkpoint may also exclude sensitive
+layers from Skip-Softmax.
 
 ## Timestep gating
 
