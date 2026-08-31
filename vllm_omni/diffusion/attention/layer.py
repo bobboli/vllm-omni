@@ -7,7 +7,6 @@
 # https://github.com/feifeibear/long-context-attention/blob/main/yunchang/attention/layer.py
 
 
-from collections.abc import Callable
 from dataclasses import replace
 
 import torch
@@ -190,12 +189,6 @@ class Attention(nn.Module):
                 return self._no_parallel_strategy
         return self.parallel_strategy
 
-    @property
-    def qkv_compute_overlap_enabled(self) -> bool:
-        """Whether the active parallel strategy can pipeline Q/K/V producers."""
-        strategy = self._get_active_parallel_strategy()
-        return bool(getattr(strategy, "qkv_compute_overlap_enabled", False))
-
     def _init_kv_cache_quantization(self, config) -> None:
         if config is None:
             return
@@ -289,11 +282,6 @@ class Attention(nn.Module):
     ) -> torch.Tensor:
         # Get the appropriate parallel strategy based on SP active state
         strategy = self._get_active_parallel_strategy()
-        if getattr(strategy, "qkv_compute_overlap_enabled", False):
-            raise RuntimeError(
-                "async_ulysses requires the model attention site to provide staged "
-                "Q/K/V producers through forward_from_qkv_producers()"
-            )
 
         # 1. Prepare inputs (Communication / Resharding)
         # For Ulysses: AllToAll Q/K/V; Slicing joint_q/k/v
@@ -302,59 +290,34 @@ class Attention(nn.Module):
 
         return self._forward_prepared(query, key, value, attn_metadata, strategy, ctx)
 
-    def forward_from_qkv_producers(
-        self,
-        *,
-        compute_query: Callable[[], torch.Tensor],
-        compute_key: Callable[[], torch.Tensor],
-        compute_value: Callable[[], torch.Tensor],
-        attn_metadata: AttentionMetadata | None = None,
-    ) -> torch.Tensor:
-        """Run attention while a parallel strategy pipelines Q/K/V production.
-
-        Models that can stage Q/K/V preparation can use this entry point
-        without coupling their scheduling to an attention kernel backend.
-        Strategies without producer overlap evaluate Q/K/V normally and reuse
-        the synchronous path. Both paths evaluate producers in V, Q, K order.
-        """
-        strategy = self._get_active_parallel_strategy()
-        prepare = getattr(strategy, "pre_attention_from_qkv_producers", None)
-        if prepare is None or not getattr(strategy, "qkv_compute_overlap_enabled", False):
-            value = compute_value()
-            query = compute_query()
-            key = compute_key()
-            return self._forward_impl(
-                query,
-                key,
-                value,
-                attn_metadata,
-            )
-
-        query, key, value, attn_metadata, ctx = prepare(
-            compute_query=compute_query,
-            compute_key=compute_key,
-            compute_value=compute_value,
-            attn_metadata=attn_metadata,
-        )
-        return self._forward_prepared_compile_boundary(
-            query,
-            key,
-            value,
-            attn_metadata,
-            strategy,
-            ctx,
-        )
-
-    @torch.compiler.disable
-    def _forward_prepared_compile_boundary(
+    def forward_from_ulysses_qkv(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        attn_metadata: AttentionMetadata | None,
-        strategy,
-        ctx,
+        attn_metadata: AttentionMetadata | None = None,
     ) -> torch.Tensor:
+        """Run Ulysses attention from global-sequence, local-head Q/K/V.
+
+        The projection has already performed the input sequence all-gather, so
+        the Ulysses strategy only constructs the context needed for the reverse
+        output exchange. This entry point requires an active Ulysses region;
+        falling back to local attention would leave the output head-sharded.
+        """
+        strategy = self._get_active_parallel_strategy()
+        prepare = getattr(strategy, "pre_attention_from_ulysses_qkv", None)
+        if prepare is None:
+            raise RuntimeError(
+                "forward_from_ulysses_qkv requires an active Ulysses parallel strategy; "
+                f"got {getattr(strategy, 'name', type(strategy).__name__)!r}"
+            )
+
+        query, key, value, attn_metadata, ctx = prepare(
+            query,
+            key,
+            value,
+            attn_metadata=attn_metadata,
+        )
         return self._forward_prepared(query, key, value, attn_metadata, strategy, ctx)
 
     def _forward_prepared(

@@ -63,6 +63,11 @@ class DiffusionLoRAManager:
         self.pipeline = pipeline
         self.device = device
         self.dtype = dtype
+        self._unsupported_lora_modules = {
+            name: reason
+            for name, module in pipeline.named_modules()
+            if (reason := getattr(module, "lora_unsupported_reason", None))
+        }
 
         # Cache supported/expected module suffixes once, before any layer
         # replacement happens. After LoRA layers are injected, the original
@@ -231,6 +236,8 @@ class DiffusionLoRAManager:
             logger.warning("Received a request with LoRA scale 0; deactivating all LoRA adapters")
             self._deactivate_all_adapters()
             return
+
+        self._raise_if_lora_unsupported()
 
         adapter_id = lora_request.lora_int_id
         logger.debug(
@@ -420,6 +427,10 @@ class DiffusionLoRAManager:
 
                     if not should_replace:
                         continue
+
+                unsupported_reason = getattr(module, "lora_unsupported_reason", None)
+                if unsupported_reason:
+                    raise ValueError(f"LoRA target {full_module_name!r} is unsupported: {unsupported_reason}")
 
                 pending_replacements.append((module_name, full_module_name, module, packed_modules_list))
 
@@ -670,6 +681,7 @@ class DiffusionLoRAManager:
         """
         Add a new adapter to the cache without activating it.
         """
+        self._raise_if_lora_unsupported()
         adapter_id = lora_request.lora_int_id
 
         if adapter_id in self._registered_adapters:
@@ -693,6 +705,16 @@ class DiffusionLoRAManager:
             "Adapter %d added, cache size: %d/%d", adapter_id, len(self._registered_adapters), self.max_cached_adapters
         )
         return True
+
+    def _raise_if_lora_unsupported(self) -> None:
+        if not self._unsupported_lora_modules:
+            return
+        name, reason = next(iter(self._unsupported_lora_modules.items()))
+        additional = len(self._unsupported_lora_modules) - 1
+        details = f"{name or '<root>'}: {reason}"
+        if additional:
+            details += f" (and {additional} more module{'s' if additional != 1 else ''})"
+        raise ValueError(f"LoRA is unsupported by this pipeline: {details}")
 
     def remove_adapter(self, adapter_id: int) -> bool:
         """

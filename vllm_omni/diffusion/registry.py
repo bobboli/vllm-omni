@@ -427,6 +427,7 @@ def _apply_sequence_parallel_if_enabled(model, od_config: OmniDiffusionConfig) -
         od_config: The OmniDiffusion configuration.
     """
 
+    async_ulysses = bool(getattr(od_config.parallel_config, "async_ulysses", False))
     try:
         sp_size = od_config.parallel_config.sequence_parallel_size
         if sp_size <= 1:
@@ -488,12 +489,17 @@ def _apply_sequence_parallel_if_enabled(model, od_config: OmniDiffusionConfig) -
         logger.debug(f"Setting sp_plan_hooks_applied={ctx.sp_plan_hooks_applied} in ``ForwardContext``!")
 
         if applied_count == 0:
-            logger.warning(
+            message = (
                 f"Sequence parallelism is enabled (sp_size={sp_size}) but no transformer with _sp_plan found. "
                 "SP hooks not applied. Consider adding _sp_plan to your transformer model."
             )
+            if async_ulysses:
+                raise RuntimeError(message)
+            logger.warning(message)
 
     except Exception as e:
+        if async_ulysses:
+            raise RuntimeError("async_ulysses requires sequence-parallel hooks, but hook application failed") from e
         logger.warning(f"Failed to apply sequence parallelism: {e}. Continuing without SP hooks.")
 
 

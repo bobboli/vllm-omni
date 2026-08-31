@@ -191,10 +191,10 @@ class DiffusionParallelConfig:
     """
 
     async_ulysses: bool = False
-    """Overlap Ulysses Q/K/V all-to-all with staged Q/K/V preparation.
+    """Fuse the Ulysses input all-gather with a head-sharded QKV projection.
 
-    This uses CUDA symmetric-memory peer copies on a side stream and currently
-    supports strict, single-node Ulysses without Ring parallelism.
+    This uses PyTorch symmetric memory and currently supports the dense BF16
+    MiniMax H3 main transformer with strict, single-node Ulysses.
     """
 
     cfg_parallel_size: int = 1

@@ -1031,24 +1031,3 @@ class SequenceParallelGroupCoordinator(GroupCoordinator):
         self.ring_rank = torch.distributed.get_rank(self.ring_group)
         self.allgather_world_size = torch.distributed.get_world_size(self.allgather_group)
         self.allgather_rank = torch.distributed.get_rank(self.allgather_group)
-        self._async_ulysses_exchange = None
-
-    def get_async_ulysses_exchange(self):
-        """Return the process-local exchange shared by all attention layers."""
-        if self._async_ulysses_exchange is None:
-            from vllm_omni.diffusion.attention.parallel.async_ulysses import AsyncUlyssesExchange
-
-            self._async_ulysses_exchange = AsyncUlyssesExchange(
-                self.ulysses_group,
-                device=self.device,
-            )
-        return self._async_ulysses_exchange
-
-    def destroy(self):
-        exchange = self._async_ulysses_exchange
-        self._async_ulysses_exchange = None
-        try:
-            if exchange is not None:
-                exchange.close()
-        finally:
-            super().destroy()

@@ -3,14 +3,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
 from vllm_omni.diffusion.attention.backends.abstract import AttentionMetadata
-from vllm_omni.diffusion.attention.parallel.base import ParallelAttentionContext, QKVProducer
+from vllm_omni.diffusion.attention.parallel.base import ParallelAttentionContext
 from vllm_omni.diffusion.distributed.comm import SeqAllToAll4D
 from vllm_omni.diffusion.distributed.group_coordinator import SequenceParallelGroupCoordinator
 from vllm_omni.diffusion.forward_context import get_ulysses_mode
@@ -181,26 +181,14 @@ class UlyssesParallelAttention:
         scatter_idx: int,
         gather_idx: int,
         use_sync: bool,
-        async_ulysses: bool = False,
+        pre_sharded_qkv: bool = False,
     ) -> None:
         self._sp_group = sp_group
         self._ulysses_pg = sp_group.ulysses_group
         self._scatter_idx = scatter_idx
         self._gather_idx = gather_idx
         self._use_sync = use_sync
-        self._async_ulysses = async_ulysses
-        self._async_exchange = None
-        if async_ulysses:
-            if use_sync:
-                raise ValueError("async_ulysses requires use_sync=False")
-            if scatter_idx != 2 or gather_idx != 1:
-                raise ValueError(
-                    "async_ulysses requires scatter_idx=2 and gather_idx=1 "
-                    f"(got scatter_idx={scatter_idx}, gather_idx={gather_idx})"
-                )
-            if sp_group.ring_world_size > 1:
-                raise ValueError("async_ulysses does not support hybrid Ulysses+Ring")
-            self._async_exchange = sp_group.get_async_ulysses_exchange()
+        self._pre_sharded_qkv = pre_sharded_qkv
 
     @property
     def enabled(self) -> bool:
@@ -210,61 +198,68 @@ class UlyssesParallelAttention:
     def name(self) -> str:
         return "ulysses"
 
-    @property
-    def qkv_compute_overlap_enabled(self) -> bool:
-        return self._async_ulysses
-
-    def pre_attention_from_qkv_producers(
+    def pre_attention_from_ulysses_qkv(
         self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
         *,
-        compute_query: QKVProducer,
-        compute_key: QKVProducer,
-        compute_value: QKVProducer,
         attn_metadata: AttentionMetadata | None,
     ):
-        """Pipeline V/Q/K production with strict Ulysses input exchange."""
-        if not self._async_ulysses:
-            return self.pre_attention(
-                compute_query(),
-                compute_key(),
-                compute_value(),
-                attn_metadata,
-            )
+        """Prepare local-head Q/K/V whose sequence is already global."""
+        if not self._pre_sharded_qkv:
+            raise ValueError("pre-sharded Ulysses Q/K/V requires async_ulysses=True in the parallel configuration")
         if get_ulysses_mode(default="strict") != "strict":
-            raise ValueError("async_ulysses currently requires ulysses_mode='strict'")
-        if attn_metadata is not None and any(
-            tensor is not None
-            for tensor in (
-                attn_metadata.joint_query,
-                attn_metadata.joint_key,
-                attn_metadata.joint_value,
+            raise ValueError("pre-sharded Ulysses Q/K/V requires ulysses_mode='strict'")
+        if self._scatter_idx != 2 or self._gather_idx != 1:
+            raise ValueError(
+                "pre-sharded Ulysses Q/K/V requires scatter_idx=2 and gather_idx=1, "
+                f"got scatter_idx={self._scatter_idx}, gather_idx={self._gather_idx}"
             )
-        ):
-            raise ValueError("async_ulysses does not yet support joint attention tensors")
+        if self._sp_group.ring_world_size > 1:
+            raise ValueError("pre-sharded Ulysses Q/K/V does not support hybrid Ulysses+Ring")
 
-        exchange = self._async_exchange
-        assert exchange is not None
-        try:
-            value_handle = exchange.issue(compute_value())
-            query_handle = exchange.issue(compute_query())
-            key_handle = exchange.issue(compute_key())
-            query, key, value = exchange.join((query_handle, key_handle, value_handle))
-        except Exception as error:
-            try:
-                exchange.abort()
-            except Exception as abort_error:
-                error.add_note(f"async Ulysses cleanup also failed: {abort_error!r}")
-            raise
+        tensors = {"query": query, "key": key, "value": value}
+        for name, tensor in tensors.items():
+            if tensor.ndim != 4:
+                raise ValueError(
+                    "pre-sharded Ulysses Q/K/V must use [B, S_global, H_local, D], "
+                    f"got {name} shape {tuple(tensor.shape)}"
+                )
+        batch_size, global_seq_len, _, head_dim = query.shape
+        if global_seq_len % self._sp_group.ulysses_world_size:
+            raise ValueError(
+                "pre-sharded Ulysses Q/K/V requires the global sequence length to be "
+                "divisible by ulysses_degree for the reverse exchange: "
+                f"{global_seq_len} % {self._sp_group.ulysses_world_size} != 0"
+            )
+        for name, tensor in (("key", key), ("value", value)):
+            if tensor.shape[0] != batch_size or tensor.shape[1] != global_seq_len or tensor.shape[3] != head_dim:
+                raise ValueError(
+                    "pre-sharded Ulysses Q/K/V must agree on batch, global sequence, and head dimensions: "
+                    f"query={tuple(query.shape)}, {name}={tuple(tensor.shape)}"
+                )
 
-        if attn_metadata is not None and attn_metadata.attn_mask is not None:
-            mask = attn_metadata.attn_mask
-            if mask.ndim == 2:
-                if mask.shape[1] != query.shape[1]:
+        if attn_metadata is not None:
+            joint_fields = {
+                "joint_query": attn_metadata.joint_query,
+                "joint_key": attn_metadata.joint_key,
+                "joint_value": attn_metadata.joint_value,
+                "joint_attn_mask": attn_metadata.joint_attn_mask,
+            }
+            present = [name for name, tensor in joint_fields.items() if tensor is not None]
+            if present:
+                raise ValueError(f"pre-sharded Ulysses Q/K/V does not support joint attention metadata; got {present}")
+
+            if attn_metadata.attn_mask is not None:
+                mask = attn_metadata.attn_mask
+                if mask.ndim == 2 and mask.shape[1] != global_seq_len:
                     raise ValueError(
-                        "async_ulysses attention mask must describe the global sequence: "
-                        f"mask length {mask.shape[1]} != sequence length {query.shape[1]}"
+                        "pre-sharded Ulysses attention mask must describe the global sequence: "
+                        f"mask length {mask.shape[1]} != sequence length {global_seq_len}"
                     )
-                attn_metadata.attn_mask = mask.bool().contiguous()
+                if mask.ndim == 2:
+                    attn_metadata = replace(attn_metadata, attn_mask=mask.bool().contiguous())
 
         ctx = _UlyssesCtx(
             name=self.name,
@@ -282,6 +277,11 @@ class UlyssesParallelAttention:
         value: torch.Tensor,
         attn_metadata: AttentionMetadata | None,
     ):
+        if self._pre_sharded_qkv:
+            raise RuntimeError(
+                "async_ulysses requires a model integration that projects global-sequence, "
+                "local-head Q/K/V and calls Attention.forward_from_ulysses_qkv()"
+            )
         mode = get_ulysses_mode(default="strict")
         ulysses_world_size = self._sp_group.ulysses_world_size
 

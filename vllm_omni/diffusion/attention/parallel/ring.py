@@ -58,10 +58,6 @@ class RingParallelAttention:
     def name(self) -> str:
         return "ring"
 
-    @property
-    def qkv_compute_overlap_enabled(self) -> bool:
-        return False
-
     def pre_attention(
         self,
         query: torch.Tensor,

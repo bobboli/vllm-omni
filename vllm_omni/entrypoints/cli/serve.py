@@ -502,7 +502,7 @@ class OmniServeCommand(CLISubcommand):
             "--async-ulysses",
             action="store_true",
             default=False,
-            help=("Overlap strict Ulysses Q/K/V all-to-all with staged preparation using CUDA Copy Engines."),
+            help=("Fuse strict Ulysses input gathering with a head-sharded QKV projection."),
         )
         omni_config_group.add_argument(
             "--ring",

@@ -217,7 +217,7 @@ For a combined service on four high-memory GPUs, use:
 
 - no CPU or layerwise offload;
 - Ulysses sequence parallelism degree 4;
-- asynchronous Q/K/V Ulysses input exchange;
+- a QKV projection fused with the Ulysses input all-gather;
 - native tiled VAE patch parallelism degree 4;
 - regional `torch.compile` for the repeated DiT blocks;
 - dense BF16 `TRTLLM_ATTN`, with Ring and TP left at 1.
@@ -246,10 +246,11 @@ vllm serve "${MODEL}" \
   --vae-use-tiling
 ```
 
-`--async-ulysses` keeps the main DiT's fused QKV projection, then pipelines its
-V/Q/K input exchanges with Q/K normalization and RoPE using CUDA Copy Engines.
-It requires a single-node, all-peer-access GPU topology and pure strict
-Ulysses. Omit the flag to use the standard Ulysses collective path.
+`--async-ulysses` shards the main DiT's QKV output heads over Ulysses ranks and
+fuses its input sequence all-gather with the projection. It requires dense BF16
+weights on a single-node, all-peer-access GPU topology, with TP and Ring set to
+1, strict Ulysses, and LoRA and distributed layerwise offload disabled. Omit
+the flag to use the standard Ulysses collective path.
 
 Do not add `--enforce-eager` to this performance configuration. The first
 request includes regional compilation; warm the server once before measuring

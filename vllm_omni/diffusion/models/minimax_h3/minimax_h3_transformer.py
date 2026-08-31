@@ -28,7 +28,11 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from vllm_omni.diffusion.attention.backends.abstract import AttentionMetadata, VideoTokenLayout
 from vllm_omni.diffusion.attention.layer import Attention
+from vllm_omni.diffusion.attention.parallel.async_ulysses import (
+    UlyssesAllGatherQKVLinear,
+)
 from vllm_omni.diffusion.cache.cachedit import CacheDiTAdapterConfig
+from vllm_omni.diffusion.distributed.parallel_state import get_sp_group
 from vllm_omni.diffusion.distributed.sp_plan import (
     SequenceParallelInput,
     SequenceParallelOutput,
@@ -323,23 +327,40 @@ class MiniMaxH3Attention(nn.Module):
         role: str = "self",
         role_category: str | None = None,
         skip_sequence_parallel: bool = False,
+        async_ulysses: bool = False,
     ) -> None:
         super().__init__()
         self.total_num_heads = arch.num_attention_heads
         self.head_dim = arch.attention_head_dim
         inner_dim = self.total_num_heads * self.head_dim
         self.softmax_scale = self.head_dim**-0.5
-        self.qkv_proj = QKVParallelLinear(
-            hidden_size=arch.hidden_size,
-            head_size=self.head_dim,
-            total_num_heads=self.total_num_heads,
-            total_num_kv_heads=self.total_num_heads,
-            bias=False,
-            params_dtype=_BF16_DTYPE,
-            quant_config=quant_config,
-            prefix=f"{prefix}.qkv_proj",
-            return_bias=True,
-        )
+        self.async_ulysses = async_ulysses
+        if async_ulysses:
+            if skip_sequence_parallel:
+                raise ValueError("async_ulysses cannot be used by attention outside a sharded SP region")
+            if quant_config is not None:
+                raise ValueError("async_ulysses currently supports unquantized QKV projections only")
+            self.qkv_proj = UlyssesAllGatherQKVLinear(
+                hidden_size=arch.hidden_size,
+                head_size=self.head_dim,
+                total_num_heads=self.total_num_heads,
+                total_num_kv_heads=self.total_num_heads,
+                process_group=get_sp_group().ulysses_group,
+                params_dtype=_BF16_DTYPE,
+                prefix=f"{prefix}.qkv_proj",
+            )
+        else:
+            self.qkv_proj = QKVParallelLinear(
+                hidden_size=arch.hidden_size,
+                head_size=self.head_dim,
+                total_num_heads=self.total_num_heads,
+                total_num_kv_heads=self.total_num_heads,
+                bias=False,
+                params_dtype=_BF16_DTYPE,
+                quant_config=quant_config,
+                prefix=f"{prefix}.qkv_proj",
+                return_bias=True,
+            )
         self.num_heads = self.qkv_proj.num_heads
         self.num_kv_heads = self.qkv_proj.num_kv_heads
         self.rot_dim = 6 * arch.rope_inv_freq_len
@@ -394,9 +415,9 @@ class MiniMaxH3Attention(nn.Module):
     ) -> AttentionMetadata:
         """Build scalar-dependent packed metadata in a small eager island.
 
-        Keeping Q/K/V producers outside this boundary allows their compute to
-        overlap Ulysses communication while the scalar packed-layout logic
-        remains opaque to Dynamo.
+        Keeping projection and Q/K preparation outside this boundary lets the
+        regional graph compile those operations while scalar packed-layout
+        logic remains opaque to Dynamo.
         """
         # max_seqlen is already the first (real) packed document length. Do
         # not read the CUDA cu_seqlens scalars here: this function runs once
@@ -467,6 +488,33 @@ class MiniMaxH3Attention(nn.Module):
             metadata,
         ).squeeze(0)
 
+    @torch.compiler.disable
+    def _run_packed_attention_from_ulysses_qkv(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        *,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+        packed_total: int,
+        video_layout: VideoTokenLayout | None = None,
+    ) -> torch.Tensor:
+        """Run attention and the reverse exchange from local-head Q/K/V."""
+        metadata = self._build_packed_attention_metadata(
+            device=q.device,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+            packed_total=packed_total,
+            video_layout=video_layout,
+        )
+        return self.attention.forward_from_ulysses_qkv(
+            q.unsqueeze(0),
+            k.unsqueeze(0),
+            v.unsqueeze(0),
+            metadata,
+        ).squeeze(0)
+
     def forward(
         self,
         x: torch.Tensor,
@@ -482,8 +530,8 @@ class MiniMaxH3Attention(nn.Module):
 
         Operation order: fused qkv projection -> per-head q/k RMSNorm -> RoPE
         on q/k -> variable-length non-causal flash attention -> output
-        projection. Async Ulysses keeps the fused projection and pipelines the
-        V/Q/K exchange with Q/K postprocessing.
+        projection. Async Ulysses fuses the input sequence all-gather with a
+        projection whose output heads are sharded over Ulysses ranks.
 
         With Ulysses sequence parallelism, x holds this rank's row shard;
         qkv/norm/RoPE run locally, an all-to-all trades sequence for heads.
@@ -494,41 +542,39 @@ class MiniMaxH3Attention(nn.Module):
         total = x.shape[0]
         packed_length = packed_total if packed_total is not None else total
 
-        if self.attention.qkv_compute_overlap_enabled:
+        if self.async_ulysses:
             qkv, _ = self.qkv_proj(x)
+            global_total = qkv.shape[0]
+            if global_total != packed_length:
+                raise ValueError(
+                    "async_ulysses QKV projection must gather the full packed sequence: "
+                    f"got {global_total} rows, expected {packed_length}"
+                )
             q_size = self.num_heads * self.head_dim
             kv_size = self.num_kv_heads * self.head_dim
-            query, key, value = qkv.split([q_size, kv_size, kv_size], dim=-1)
+            q, k, v = qkv.split([q_size, kv_size, kv_size], dim=-1)
+            q = self.q_norm(q.view(global_total, self.num_heads, self.head_dim))
+            k = self.k_norm(k.view(global_total, self.num_kv_heads, self.head_dim))
+            v = v.view(global_total, self.num_kv_heads, self.head_dim)
+            if rope_freqs is not None:
+                if rope_freqs.shape[0] != global_total:
+                    raise ValueError(
+                        "async_ulysses requires replicated global RoPE rows: "
+                        f"got {rope_freqs.shape[0]}, expected {global_total}"
+                    )
+                q = self._apply_rope(q, rope_freqs)
+                k = self._apply_rope(k, rope_freqs)
 
-            def compute_value() -> torch.Tensor:
-                return value.view(total, self.num_kv_heads, self.head_dim).unsqueeze(0)
-
-            def compute_query() -> torch.Tensor:
-                normalized = self.q_norm(query.view(total, self.num_heads, self.head_dim))
-                if rope_freqs is not None:
-                    normalized = self._apply_rope(normalized, rope_freqs)
-                return normalized.unsqueeze(0)
-
-            def compute_key() -> torch.Tensor:
-                normalized = self.k_norm(key.view(total, self.num_kv_heads, self.head_dim))
-                if rope_freqs is not None:
-                    normalized = self._apply_rope(normalized, rope_freqs)
-                return normalized.unsqueeze(0)
-
-            metadata = self._build_packed_attention_metadata(
-                device=x.device,
+            out = self._run_packed_attention_from_ulysses_qkv(
+                q,
+                k,
+                v,
                 cu_seqlens=cu_seqlens,
                 max_seqlen=max_seqlen,
                 packed_total=packed_length,
                 video_layout=video_layout,
             )
-            out = self.attention.forward_from_qkv_producers(
-                compute_query=compute_query,
-                compute_key=compute_key,
-                compute_value=compute_value,
-                attn_metadata=metadata,
-            ).squeeze(0)
-            out = out.reshape(total, self.num_heads * self.head_dim)
+            out = out.reshape(total, self.total_num_heads * self.head_dim)
             out, _ = self.out_proj(out)
             return out
 
@@ -736,6 +782,7 @@ class MiniMaxH3DiTBlock(nn.Module):
         quant_config: QuantizationConfig | None,
         *,
         prefix: str,
+        async_ulysses: bool = False,
     ) -> None:
         super().__init__()
         self.norm1 = _norm(arch.hidden_size, eps=arch.norm_eps)
@@ -746,6 +793,7 @@ class MiniMaxH3DiTBlock(nn.Module):
             arch,
             quant_config,
             prefix=f"{prefix}.attn",
+            async_ulysses=async_ulysses,
         )
         self.mlp = MiniMaxH3MLP(
             arch,
@@ -960,6 +1008,37 @@ class MiniMaxH3DiTModel(nn.Module):
         if arch.ffn_hidden_size <= 0:
             raise ValueError("ffn_hidden_size must be positive.")
 
+    def _configure_async_ulysses(
+        self,
+        *,
+        tp_size: int,
+        quant_config: QuantizationConfig | None,
+    ) -> None:
+        self.async_ulysses = bool(self.parallel_config.async_ulysses)
+        if not self.async_ulysses:
+            return
+        if tp_size != 1:
+            raise ValueError(f"async_ulysses for MiniMax H3 requires tensor_parallel_size=1, got {tp_size}")
+        if quant_config is not None:
+            raise ValueError("async_ulysses for MiniMax H3 currently requires an unquantized model")
+        if self.parallel_config.ulysses_degree <= 1:
+            raise ValueError("async_ulysses for MiniMax H3 requires ulysses_degree > 1")
+        if self.parallel_config.ulysses_mode != "strict":
+            raise ValueError("async_ulysses for MiniMax H3 requires ulysses_mode='strict'")
+        if self.parallel_config.ring_degree != 1:
+            raise ValueError("async_ulysses for MiniMax H3 requires ring_degree=1")
+        if self.parallel_config.use_hsdp:
+            raise ValueError("async_ulysses for MiniMax H3 does not support HSDP")
+        if getattr(self.od_config, "enable_distributed_layerwise_offload", False):
+            raise ValueError("async_ulysses for MiniMax H3 does not support distributed layerwise offload")
+
+        # RoPE is computed once from the global position IDs and remains
+        # replicated while hidden states and AdaLN indices are row-sharded.
+        self._sp_plan = {
+            "sp_prepare": {index: spec for index, spec in type(self)._sp_plan["sp_prepare"].items() if index != 1},
+            "sp_gather": type(self)._sp_plan["sp_gather"],
+        }
+
     def __init__(
         self,
         od_config: OmniDiffusionConfig,
@@ -979,7 +1058,10 @@ class MiniMaxH3DiTModel(nn.Module):
             arch=arch,
             tp_size=get_tensor_model_parallel_world_size(),
         )
-        local_heads = arch.num_attention_heads // get_tensor_model_parallel_world_size()
+        tp_size = get_tensor_model_parallel_world_size()
+        self._configure_async_ulysses(tp_size=tp_size, quant_config=quant_config)
+
+        local_heads = arch.num_attention_heads // tp_size
         ulysses_degree = int(self.parallel_config.ulysses_degree)
         if local_heads % ulysses_degree:
             raise ValueError(
@@ -1033,6 +1115,7 @@ class MiniMaxH3DiTModel(nn.Module):
                     arch,
                     quant_config,
                     prefix=f"blocks.{i}",
+                    async_ulysses=self.async_ulysses,
                 )
                 for i in range(arch.num_layers)
             ]

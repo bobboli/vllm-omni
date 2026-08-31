@@ -142,6 +142,27 @@ def test_lora_manager_replace_layers_does_not_rewrap_base_layer(monkeypatch):
     assert replace_calls == ["foo"]
 
 
+def test_lora_manager_rejects_adapters_when_a_module_is_unsupported():
+    pipeline = torch.nn.Module()
+    pipeline.transformer = torch.nn.Module()
+    pipeline.transformer.blocked = torch.nn.Module()
+    pipeline.transformer.blocked.lora_unsupported_reason = "requires a fused collective"
+    pipeline.transformer.other = torch.nn.Module()
+
+    manager = DiffusionLoRAManager(
+        pipeline=pipeline,
+        device=torch.device("cpu"),
+        dtype=torch.bfloat16,
+        max_cached_adapters=1,
+    )
+    request = LoRARequest(lora_name="test", lora_int_id=1, lora_path="unused")
+    with pytest.raises(ValueError, match="transformer.blocked.*requires a fused collective"):
+        manager.set_active_adapter(request)
+    with pytest.raises(ValueError, match="transformer.blocked.*requires a fused collective"):
+        manager.add_adapter(request)
+    assert not manager._registered_adapters
+
+
 def test_lora_manager_replaces_packed_layer_when_targeting_sublayers(monkeypatch):
     import vllm_omni.diffusion.lora.manager as manager_mod
 

@@ -3,15 +3,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
 import torch
 
 from vllm_omni.diffusion.attention.backends.abstract import AttentionMetadata
-
-QKVProducer = Callable[[], torch.Tensor]
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,9 +36,6 @@ class ParallelAttentionStrategy(Protocol):
 
     @property
     def name(self) -> str: ...
-
-    @property
-    def qkv_compute_overlap_enabled(self) -> bool: ...
 
     def pre_attention(
         self,
@@ -74,10 +68,6 @@ class NoParallelAttention:
     @property
     def name(self) -> str:
         return "none"
-
-    @property
-    def qkv_compute_overlap_enabled(self) -> bool:
-        return False
 
     def pre_attention(
         self,

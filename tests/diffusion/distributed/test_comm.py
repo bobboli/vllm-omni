@@ -13,8 +13,8 @@ from typing import Literal
 
 import pytest
 import torch
+
 from tests.helpers.mark import hardware_marks
-from vllm_omni.diffusion.attention.parallel.async_ulysses import AsyncUlyssesExchange
 from vllm_omni.diffusion.distributed.comm import RingComm, SeqAllToAll4D, SeqAllToAll5D
 from vllm_omni.diffusion.distributed.parallel_state import (
     destroy_distributed_env,
@@ -26,7 +26,6 @@ from vllm_omni.platforms import current_omni_platform
 
 _L4_TWO_GPU = hardware_marks(res={"cuda": "L4"}, num_cards=2)
 _L4_FOUR_GPU = hardware_marks(res={"cuda": "L4"}, num_cards=4)
-_H100_FOUR_GPU = hardware_marks(res={"cuda": "H100"}, num_cards=4)
 
 DeviceKind = Literal["cpu", "cuda"]
 
@@ -232,84 +231,6 @@ def _run_ring_p2p(
         destroy_distributed_env()
 
 
-def _run_async_ulysses_parity(
-    local_rank: int,
-    world_size: int,
-    master_port: int,
-) -> None:
-    device = _worker_device(local_rank, "cuda")
-    current_omni_platform.set_device(device)
-    exchange = None
-    actual = ()
-    actual_tensor = None
-    try:
-        _init_worker(local_rank, world_size, master_port, "cuda")
-        initialize_model_parallel(ulysses_degree=world_size)
-        sp_group = get_sp_group().ulysses_group
-        exchange = AsyncUlyssesExchange(sp_group)
-
-        # A partial batch must be drainable before its slots are reused.
-        aborted = torch.randn(
-            2,
-            7,
-            8,
-            16,
-            dtype=torch.bfloat16,
-            device=device,
-        )
-        exchange.issue(aborted)
-        exchange.abort()
-
-        inputs = []
-        expected_batches = []
-        for iteration, seq_len in enumerate((7, 7, 7, 5, 5, 5)):
-            tensors = []
-            for tensor_index in range(3):
-                generator = torch.Generator(device=device).manual_seed(
-                    1000 * iteration + 100 * tensor_index + local_rank
-                )
-                tensors.append(
-                    torch.randn(
-                        2,
-                        seq_len,
-                        8,
-                        16,
-                        dtype=torch.bfloat16,
-                        device=device,
-                        generator=generator,
-                    )
-                )
-
-            inputs.append(tensors)
-            expected_batches.append(tuple(SeqAllToAll4D.apply(sp_group, tensor, 2, 1, False) for tensor in tensors))
-
-        actual_batches = []
-        for query, key, value in inputs:
-            value_handle = exchange.issue(value)
-            query_handle = exchange.issue(query)
-            key_handle = exchange.issue(key)
-            actual = exchange.join((query_handle, key_handle, value_handle))
-
-            # Delay consumers differently on every rank. The next batch must
-            # not overwrite the shared bank until all ranks have reached the
-            # reuse handshake after their preceding consumer.
-            torch.cuda._sleep(5_000_000 * (local_rank + 1))
-            actual_batches.append(tuple(tensor.clone() for tensor in actual))
-            actual = ()
-
-        for actual_batch, expected_batch in zip(actual_batches, expected_batches):
-            for actual_tensor, expected_tensor in zip(actual_batch, expected_batch):
-                torch.testing.assert_close(actual_tensor, expected_tensor, atol=0, rtol=0)
-        actual_batches = []
-        actual_tensor = None
-    finally:
-        actual = ()
-        actual_tensor = None
-        if exchange is not None:
-            exchange.close()
-        destroy_distributed_env()
-
-
 def _spawn_4d_identity(
     *,
     world_size: int,
@@ -385,14 +306,6 @@ def _spawn_ring_p2p(
     )
 
 
-def _spawn_async_ulysses_parity(*, world_size: int, master_port: int) -> None:
-    torch.multiprocessing.spawn(
-        _run_async_ulysses_parity,
-        args=(world_size, master_port),
-        nprocs=world_size,
-    )
-
-
 def _require_heads_divisible(num_heads: int, world_size: int) -> None:
     if num_heads % world_size != 0:
         pytest.skip(f"num_heads ({num_heads}) not divisible by world_size ({world_size})")
@@ -402,22 +315,6 @@ def _require_gpus(world_size: int) -> None:
     available_gpus = current_omni_platform.get_device_count()
     if available_gpus < world_size:
         pytest.skip(f"Test requires {world_size} GPUs but only {available_gpus} available")
-
-
-def _require_async_ulysses_support(world_size: int) -> None:
-    _require_gpus(world_size)
-
-    import torch.distributed._symmetric_memory as symm_mem
-
-    if symm_mem.get_backend(torch.device("cuda", 0)) != "CUDA":
-        pytest.skip("Async Ulysses requires the CUDA symmetric-memory backend")
-    if any(
-        not torch.cuda.can_device_access_peer(source, destination)
-        for source in range(world_size)
-        for destination in range(world_size)
-        if source != destination
-    ):
-        pytest.skip("Async Ulysses requires peer access between every participating GPU")
 
 
 # ---------------------------------------------------------------------------
@@ -564,12 +461,3 @@ def test_ring_p2p_parity(world_size: int, dtype: torch.dtype):
         device_kind="cuda",
         master_port=29501,
     )
-
-
-@pytest.mark.full_model
-@pytest.mark.diffusion
-@pytest.mark.parallel
-@pytest.mark.parametrize("world_size", [pytest.param(4, marks=_H100_FOUR_GPU)])
-def test_async_ulysses_matches_nccl_and_reuses_slots(world_size: int):
-    _require_async_ulysses_support(world_size)
-    _spawn_async_ulysses_parity(world_size=world_size, master_port=29503)

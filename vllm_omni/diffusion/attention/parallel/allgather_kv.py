@@ -43,10 +43,6 @@ class AllGatherKVParallelAttention:
     def name(self) -> str:
         return "allgather_kv"
 
-    @property
-    def qkv_compute_overlap_enabled(self) -> bool:
-        return False
-
     def pre_attention(
         self,
         query: torch.Tensor,

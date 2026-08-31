@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch.nn as nn
@@ -120,3 +122,97 @@ def test_tp_accepts_checkpoint_supported_sizes():
     arch = MiniMaxH3DiTArchConfig()
     for tp_size in (1, 2, 4, 7):
         model._validate_tp_config(arch=arch, tp_size=tp_size)
+
+
+def test_async_ulysses_sp_plan_keeps_global_rope_rows():
+    from vllm_omni.diffusion.models.minimax_h3.minimax_h3_transformer import (
+        MiniMaxH3DiTModel,
+    )
+
+    model = object.__new__(MiniMaxH3DiTModel)
+    model.parallel_config = SimpleNamespace(
+        async_ulysses=True,
+        ulysses_degree=4,
+        ulysses_mode="strict",
+        ring_degree=1,
+        use_hsdp=False,
+    )
+    model.od_config = SimpleNamespace(enable_distributed_layerwise_offload=False)
+
+    model._configure_async_ulysses(tp_size=1, quant_config=None)
+
+    assert set(model._sp_plan["sp_prepare"]) == {0, 2}
+    assert set(MiniMaxH3DiTModel._sp_plan["sp_prepare"]) == {0, 1, 2}
+
+
+@pytest.mark.parametrize(
+    ("tp_size", "quant_config", "dlo", "message"),
+    [
+        (2, None, False, "tensor_parallel_size=1"),
+        (1, object(), False, "unquantized model"),
+        (1, None, True, "distributed layerwise offload"),
+    ],
+)
+def test_async_ulysses_rejects_incompatible_projection_ownership(tp_size, quant_config, dlo, message):
+    from vllm_omni.diffusion.models.minimax_h3.minimax_h3_transformer import (
+        MiniMaxH3DiTModel,
+    )
+
+    model = object.__new__(MiniMaxH3DiTModel)
+    model.parallel_config = SimpleNamespace(
+        async_ulysses=True,
+        ulysses_degree=4,
+        ulysses_mode="strict",
+        ring_degree=1,
+        use_hsdp=False,
+    )
+    model.od_config = SimpleNamespace(enable_distributed_layerwise_offload=dlo)
+
+    with pytest.raises(ValueError, match=message):
+        model._configure_async_ulysses(tp_size=tp_size, quant_config=quant_config)
+
+
+def test_async_ulysses_is_selected_only_for_main_blocks(monkeypatch: pytest.MonkeyPatch):
+    import vllm_omni.diffusion.models.minimax_h3.minimax_h3_transformer as h3_module
+
+    calls = []
+
+    class _FakeAttention(nn.Module):
+        def __init__(self, _arch, _quant_config, **kwargs):
+            super().__init__()
+            calls.append(kwargs)
+
+    monkeypatch.setattr(h3_module, "_norm", lambda *args, **kwargs: nn.Identity())
+    monkeypatch.setattr(h3_module, "MiniMaxH3Attention", _FakeAttention)
+    monkeypatch.setattr(h3_module, "MiniMaxH3MLP", lambda *args, **kwargs: nn.Identity())
+    monkeypatch.setattr(h3_module, "MiniMaxH3AdalnProj", lambda *args, **kwargs: nn.Identity())
+    arch = h3_module.MiniMaxH3DiTArchConfig()
+
+    h3_module.MiniMaxH3DiTBlock(arch, None, prefix="blocks.0", async_ulysses=True)
+    h3_module.MiniMaxH3TokenRefinerBlock(arch, None, prefix="token_refiner.blocks.0")
+
+    assert calls[0]["async_ulysses"] is True
+    assert "async_ulysses" not in calls[1]
+    assert calls[1]["skip_sequence_parallel"] is True
+
+
+def test_async_ulysses_requires_sequence_parallel_hooks(monkeypatch: pytest.MonkeyPatch):
+    import vllm_omni.diffusion.registry as registry_module
+
+    pipeline = nn.Module()
+    pipeline._dit_modules = ("transformer",)
+    pipeline.transformer = nn.Module()
+    parallel_config = SimpleNamespace(
+        sequence_parallel_size=4,
+        async_ulysses=True,
+        allgather_degree=1,
+        ulysses_degree=4,
+        ring_degree=1,
+    )
+    config = SimpleNamespace(parallel_config=parallel_config)
+    context = SimpleNamespace(sp_plan_hooks_applied=None)
+    monkeypatch.setattr(registry_module, "get_forward_context", lambda: context)
+
+    with pytest.raises(RuntimeError, match="requires sequence-parallel hooks"):
+        registry_module._apply_sequence_parallel_if_enabled(pipeline, config)
+    assert context.sp_plan_hooks_applied is False

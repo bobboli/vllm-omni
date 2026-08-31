@@ -65,11 +65,11 @@ omni = Omni(
 )
 ```
 
-### Overlap Q/K/V Preparation with Ulysses
+### Fuse the QKV Projection with Ulysses Input Gathering
 
-Models that can stage Q/K/V preparation can start each input exchange as soon
-as its tensor is ready, then overlap it with preparation of the next tensor.
-Enable this path with `async_ulysses=True`:
+MiniMax H3 can replace its input Q/K/V all-to-all with a symmetric-memory
+all-gather fused into the QKV projection. Each rank stores and computes only
+its assigned attention heads. Enable this path with `async_ulysses=True`:
 
 ```python
 omni = Omni(
@@ -81,18 +81,15 @@ omni = Omni(
 )
 ```
 
-The asynchronous path uses CUDA symmetric-memory peer copies on a side stream.
-It overlaps only the input Q/K/V exchanges; the output Ulysses exchange remains
-a standard collective. It currently requires all of the following:
+The output Ulysses exchange remains a standard collective. The fused input path
+currently requires all of the following:
 
 - a single node where every worker exposes every participating NVIDIA GPU and
   every pair of those GPUs has CUDA peer access;
-- strict Ulysses with `ring_degree=1` and HSDP disabled;
-- equal Q/K/V shapes and no joint-attention tensors; and
-- a model integration that supplies staged Q/K/V producers. MiniMax H3 keeps
-  its fused QKV projection, then overlaps V and Q exchange with Q/K
-  normalization and RoPE. Producers, exchange calls, and joined-output
-  consumers must remain ordered on one CUDA compute stream.
+- strict Ulysses with TP and `ring_degree` set to 1;
+- dense BF16 weights, with LoRA, HSDP, and distributed layerwise offload disabled; and
+- no joint-attention tensors. MiniMax H3 applies this only to its main DiT
+  blocks; its replicated token refiner uses the ordinary projection.
 
 ### Alternative Methods
 
@@ -199,7 +196,7 @@ In `DiffusionParallelConfig`:
 | `ulysses_degree` | int | 1 | Number of GPUs for Ulysses-SP. Uses all-to-all communication. |
 | `ring_degree` | int | 1 | Number of GPUs for Ring-Attention. Uses P2P ring communication. |
 | `ulysses_mode` | str | `"strict"` | Ulysses attention mode. Set to `"advanced_uaa"` to handle arbitrary sequence lengths and head counts without padding. |
-| `async_ulysses` | bool | `False` | Overlap staged Q/K/V preparation with strict Ulysses input exchange. |
+| `async_ulysses` | bool | `False` | Fuse strict Ulysses input gathering with a head-sharded QKV projection where supported. |
 
 **Notes:**
 - Total sequence parallel size equals to `ulysses_degree × ring_degree`
