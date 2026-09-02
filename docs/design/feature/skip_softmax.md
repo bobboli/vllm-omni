@@ -1,11 +1,12 @@
 # Skip-Softmax
 
-Skip-Softmax is the sparse-attention mode of the `TRTLLM_ATTN` backend. Usage — the config keys
-and how to pick an operating point — is in
-[TRTLLM Attention](../../user_guide/diffusion/attention_backends/trtllm.md#skip-softmax).
-The shared selector contract is documented in
-[Diffusion Attention Backend Selection](attention_backend_selection.md). This
-page explains the algorithm and how the configuration reaches the kernel.
+Skip-Softmax is the sparse-attention mode of the `TRTLLM_ATTN` backend. This page describes the
+algorithm, how the user configuration is resolved into the value the kernel consumes, and how
+checkpoint calibration and timestep gating participate in that resolution. Configuration keys and
+operating-point guidance are covered in
+[TRTLLM Attention](../../user_guide/diffusion/attention_backends/trtllm.md#skip-softmax); the
+backend selection contract is covered in
+[Diffusion Attention Backend Selection](attention_backend_selection.md).
 
 ## Motivation
 
