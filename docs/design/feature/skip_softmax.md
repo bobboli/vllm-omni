@@ -20,10 +20,12 @@ detects, per tile of keys, when a tile cannot matter and skips its softmax and i
 It is approximate: a skipped tile still carries a small non-zero contribution, so the mode is
 opt-in and off by default.
 
-## The online-softmax pass
+## Algorithm
 
-Attention is computed in a single streaming pass over KV tiles. Per query row the kernel maintains
-three running values:
+![The BLASST algorithm: FlashAttention with a per-tile skip test on the local maximum](../figures/skip_softmax/blasst_algorithm.jpg)
+
+FlashAttention computes attention in a single streaming pass over KV tiles. Per query row the
+kernel maintains three running values:
 
 - `m` — the largest score seen so far,
 - `l` — the running denominator `Σ exp(sⱼ − m)`,
@@ -31,14 +33,10 @@ three running values:
 
 and returns `O / l` at the end. For each KV tile it computes the scores `QK_j^T`, updates `m`, and
 accumulates the tile's contribution into `l` and `O`. Rescaling `l` and `O` when `m` grows keeps the
-dense online-softmax pass numerically exact.
+dense pass numerically exact.
 
-## The skip test
-
-![The BLASST algorithm: FlashAttention with a per-tile skip test on the local maximum](../figures/skip_softmax/blasst_algorithm.jpg)
-
-Once a tile's scores are known, its largest score `tile_max` is compared with the running maximum.
-Let `λ` be the effective threshold:
+BLASST inserts one test between computing a tile's scores and accumulating them. Let `tile_max` be
+the tile's largest score and `λ` the effective threshold:
 
 ```text
 if exp(tile_max - running_max) < λ:
@@ -48,7 +46,8 @@ if exp(tile_max - running_max) < λ:
 `exp(tile_max − running_max)` is an upper bound on the softmax weight any key in the tile can
 receive: if even the tile's best key is far below the current maximum, every key in the tile is
 unimportant, and both the Softmax and `PV` work for that tile can be skipped. The tile's
-contribution to `l` and `O` is simply omitted. A larger `λ` makes the test more aggressive.
+contribution to `l` and `O` is simply omitted. A larger `λ` makes the test more aggressive. The
+figure states the same test in log space, `m̃ − m < ln(λ)`, which is how the kernel evaluates it.
 
 ## What this bounds
 
