@@ -85,30 +85,32 @@ Resolved diffusion attention backend 'TRTLLM_ATTN' for role='self' via attention
 Skip-Softmax, also published as BLASST, is a kernel-level sparse attention
 method. After a KV tile's scores are computed, the kernel compares the tile's
 maximum score with the running row maximum. If even the best key in the tile
-would receive a softmax weight below a threshold `λ`, the tile's Softmax and
-`PV` work is skipped. `QK^T` always runs, so the kernel can remove at most the
-Softmax and `PV` share of attention time, and the achieved sparsity depends on
-the attention scores of the actual input rather than on the configured value.
-The [feature design](../../../design/feature/skip_softmax.md) derives the test
-and its bounds.
+falls far enough below that maximum, the whole tile's Softmax and `PV` work is
+skipped. `QK^T` always runs, so the kernel can remove at most the Softmax and
+`PV` share of attention time, and the achieved sparsity depends on the
+attention scores of the actual input rather than on the configured value. The
+[feature design](../../../design/feature/skip_softmax.md) states the skip test
+and derives its bounds.
 
 ### Configuration keys
 
 | Key | Range | Meaning |
 | --- | --- | --- |
-| `threshold` | `>= 0`; useful values in `(0, 1)` | Sets `λ` directly. Calibration-free. |
+| `threshold` | `>= 0`; useful values in `(0, 1)` | Skip threshold, independent of sequence length. Calibration-free. |
 | `target_sparsity` | `[0, 1]` | Requested operating point on the checkpoint's calibrated curve. Requires calibration metadata. |
 | `disabled_until_timestep` | `[0, 1]`; default `0` | Keeps attention dense while the normalized timestep `t > D`. |
 
-`threshold` and `target_sparsity` are two ways to obtain the same `λ`; setting
-both is a configuration error. Exactly one of them enables Skip-Softmax.
+`threshold` and `target_sparsity` are two ways to set the same kernel
+threshold; setting both is a configuration error. Exactly one of them enables
+Skip-Softmax.
 
 ### What the kernel consumes
 
 The FlashInfer kernel takes a `threshold_scale_factor` and divides it by the
-KV sequence length to obtain `λ`. vLLM-Omni exposes `λ` itself as `threshold`
-and performs the multiplication by sequence length internally, so the same
-`threshold` means the same per-tile test at any resolution or frame count.
+KV sequence length to obtain the per-tile skip threshold. vLLM-Omni exposes
+that per-tile threshold directly as `threshold` and multiplies by the sequence
+length internally, so the same `threshold` means the same per-tile test at any
+resolution or frame count.
 When porting a setting from TensorRT-LLM, which exposes the scale factor
 directly:
 
@@ -135,8 +137,8 @@ vllm serve <model> --omni \
 
 ### Calibrated target sparsity
 
-A fixed `λ` does not produce a fixed fraction of skipped tiles because the
-score distribution changes with the model, prompt, and shape.
+A fixed `threshold` does not produce a fixed fraction of skipped tiles because
+the score distribution changes with the model, prompt, and shape.
 [NVIDIA ModelOpt](https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/diffusers/sparsity)
 can calibrate a curve that maps a desired `target_sparsity` to the kernel
 scale factor and store it in the checkpoint's transformer `config.json`.
