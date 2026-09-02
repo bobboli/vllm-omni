@@ -164,8 +164,8 @@ context. Scheduler-based pipelines pass the scheduler timestep, which is normali
 `num_train_timesteps`; rectified-flow pipelines such as MiniMax-H3 publish the current sigma
 directly. In both cases `t` follows the scheduler's own trajectory rather than the step index, so
 a given `D` yields a model-dependent number of dense steps: flow-shifted schedules spend many
-steps at high `t`. The [user guide](../../user_guide/diffusion/attention_backends/trtllm.md#timestep-gating)
-tabulates this for MiniMax-H3.
+steps at high `t`. Count dense steps from the published sequence, `count(t[i] > D)`, for the
+schedule and step count actually served.
 
 When `D > 0` is set and the pipeline has not published a timestep, the backend stays dense and
 logs a warning once rather than guessing from the step index.

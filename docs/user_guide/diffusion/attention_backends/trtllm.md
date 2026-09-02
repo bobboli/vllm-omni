@@ -163,34 +163,19 @@ Skip-Softmax runs on every step and no timestep needs to be published. `1.0`
 also leaves no step dense, but goes through the gate and therefore requires
 the pipeline to publish `t`.
 
-`t` is the scheduler's own timestep normalized to `[0, 1]`. It starts near
-`1.0` and decreases to `0.0` over the schedule, published by the pipeline for
-each denoising step. For rectified-flow models it is the current sigma. It is
-deliberately not the step index divided by the step count: flow-shifted
-schedules spend many steps at high `t`, so the number of dense steps a given
-`D` produces depends on the model's schedule. Count it from the actual
-sequence `t[0], ..., t[N-1]`:
+`t` is the scheduler's own timestep normalized to `[0, 1]`, published by the
+pipeline for each denoising step; for rectified-flow models it is the current
+sigma. It runs from near `1.0` down to `0.0`, but not linearly in the step
+index: flow-shifted schedules spend many of their steps at high `t`. The number
+of dense steps a given `D` produces therefore depends on the model's schedule
+and step count, and follows from the actual timestep sequence:
 
 ```text
 dense_steps = count(t[i] > D)
 ```
 
-For MiniMax-H3 with its default video shift of 12 and a 50-point schedule (49
-denoiser evaluations), the shifted sigmas stay above `0.9` for more than half
-of the run:
-
-| `disabled_until_timestep` | Dense steps | Skip-Softmax steps |
-| :---: | ---: | ---: |
-| `1.00` | 0 | 49 |
-| `0.99` | 6 | 43 |
-| `0.97` | 14 | 35 |
-| `0.95` | 19 | 30 |
-| `0.90` | 28 | 21 |
-| `0.86` | 33 | 16 |
-
-By contrast, a 40-step Wan2.2 UniPC schedule with flow shift 3 reaches
-`t=0.86` after 14 steps, so the same `D` gates a very different fraction of
-the run. Pick `D` from your model's schedule, not from another model's recipe.
+Derive `D` from the schedule of the model you are serving rather than reusing
+another model's value.
 
 A pipeline that does not publish `t` stays dense whenever
 `disabled_until_timestep > 0` is set, and logs a warning once. Pipelines
@@ -198,9 +183,10 @@ publish it through `DenoiseProgressMixin.record_denoise_step`.
 
 ## SAGE quantization
 
-SAGE quantization follows the SageAttention2 recipe: Q and K are quantized to
-INT8 or FP8 E4M3 for `QK^T`, and P and V use FP8 E4M3 for `PV`. P is quantized
-inside the FMHA kernel; V is quantized per channel before the kernel call.
+SAGE quantization runs both attention matrix multiplications in low precision:
+Q and K are quantized to INT8 or FP8 E4M3 for `QK^T`, and P and V use FP8 E4M3
+for `PV`. P is quantized inside the FMHA kernel; V is quantized per channel
+before the kernel call.
 vLLM-Omni exposes the Q/K dtype and the Q/K scale granularity. The P and V
 formats are fixed by the kernel, so the `quant` key has no V dtype for this
 backend. This mode is distinct from the standalone

@@ -312,11 +312,20 @@ attention. Both work under the pure Ulysses parallelism of the profile above
 - Skip-Softmax on the calibration-free path with `threshold=0.05`. The H3
   checkpoint carries no ModelOpt calibration, so `target_sparsity` is not
   available.
-- `disabled_until_timestep=0.97`. H3's default video flow shift of 12 keeps the
-  normalized timestep above `0.97` for the first 14 of 49 denoiser evaluations
-  at 50 steps, so those steps stay dense and the remaining 35 use Skip-Softmax.
-  Lower values leave more steps dense; see the
-  [gating table](https://github.com/vllm-project/vllm-omni/blob/main/docs/user_guide/diffusion/attention_backends/trtllm.md#timestep-gating).
+- `disabled_until_timestep=0.97`. The gate compares against the video sigma,
+  and H3's default video flow shift of 12 keeps that sigma high for much of
+  the run, so `0.97` already leaves the first 14 of 49 denoiser evaluations
+  dense at 50 steps. Other cutoffs map to dense steps as follows:
+
+    | `disabled_until_timestep` | Dense steps | Skip-Softmax steps |
+    | :---: | ---: | ---: |
+    | `1.00` | 0 | 49 |
+    | `0.99` | 6 | 43 |
+    | `0.97` | 14 | 35 |
+    | `0.95` | 19 | 30 |
+    | `0.90` | 28 | 21 |
+    | `0.86` | 33 | 16 |
+
 - A `per_role` entry that keeps the token refiner, a short attention path,
   dense. A per-role spec does not inherit `quant` or `skip_softmax` from
   `default`.
