@@ -137,15 +137,17 @@ kernel.
 
 The early, high-noise denoising steps set the global structure of the output, and their errors
 propagate through every later step. Keeping just these steps dense markedly improves the quality
-of the generated video at a small cost in skipped work. `disabled_until_timestep = D` implements
-this: on each attention call the backend compares the current normalized timestep `t` against `D`
-and passes no skip factor to the kernel while `t > D`. Skip-Softmax becomes active on the first
-step with `t ≤ D` and stays active for the rest of the run, since `t` only decreases.
+of the generated video at a small cost in skipped work. `disabled_until_timestep` implements this:
+on each attention call the backend compares the current normalized timestep `t` against the
+configured cutoff and passes no skip factor to the kernel while `t` is above it. Skip-Softmax
+becomes active on the first step whose `t` is at or below the cutoff and stays active for the rest
+of the run, since `t` only decreases.
 
-`D = 0`, the default, is a sentinel rather than a cutoff: the gate is off, the timestep is never
-read, and Skip-Softmax runs on every step. Any `D > 0` enables the gate. `D = 1.0` therefore also
-yields no dense steps on a pipeline that publishes `t`, but on a pipeline that does not publish it
-the backend stays dense and logs a warning once rather than guessing from the step index.
+The default `disabled_until_timestep = 0` is a sentinel rather than a cutoff: the gate is off, the
+timestep is never read, and Skip-Softmax runs on every step. Any positive value enables the gate.
+`disabled_until_timestep = 1.0` therefore also yields no dense steps on a pipeline that publishes
+`t`, but on a pipeline that does not publish it the backend stays dense and logs a warning once
+rather than guessing from the step index.
 
 ### Where `t` comes from
 
@@ -154,20 +156,20 @@ scheduler's own position in `[0, 1]`, decreasing from near `1.0` (pure noise) to
 sample): scheduler-based pipelines publish the scheduler timestep divided by `num_train_timesteps`,
 and rectified-flow pipelines publish the current sigma. `t` is deliberately not the step index
 divided by the step count. Schedulers place their steps non-uniformly in `t`, so expressing the
-cutoff in `t` keeps a given `D` tied to the same noise level across step counts and schedulers.
+cutoff in `t` ties it to the same noise level across step counts and schedulers.
 
-### Mapping `D` to denoising steps
+### Mapping the cutoff to denoising steps
 
 For a run whose published sequence is `t[0], ..., t[N-1]`, the number of dense steps is
 
 ```text
-dense_steps = count(t[i] > D)
+dense_steps = count(t[i] > disabled_until_timestep)
 skip_softmax_steps = N - dense_steps
 ```
 
-This count depends on the schedule, so the same `D` can gate a very different fraction of the run
-on two models. Flow-shifted rectified-flow schedules are the common case: with a shift `s` applied
-to `N + 1` uniform positions `u` from `1` to `0`,
+This count depends on the schedule, so the same cutoff can gate a very different fraction of the
+run on two models. Flow-shifted rectified-flow schedules are the common case: with a shift `s`
+applied to `N + 1` uniform positions `u` from `1` to `0`,
 
 ```text
 t = s * u / (1 + (s - 1) * u)
@@ -177,7 +179,7 @@ and a large `s` pushes most positions toward `t ≈ 1`. For `N = 49` steps (50 s
 `s = 12`, the published sequence starts `1.000, 0.998, 0.996, 0.995, 0.993, ...` and stays above
 `0.9` for 28 steps, giving:
 
-| `D` | Dense steps | Skip-Softmax steps |
+| `disabled_until_timestep` | Dense steps | Skip-Softmax steps |
 | :---: | ---: | ---: |
 | `1.00` | 0 | 49 |
 | `0.99` | 6 | 43 |
@@ -186,6 +188,6 @@ and a large `s` pushes most positions toward `t ≈ 1`. For `N = 49` steps (50 s
 | `0.90` | 28 | 21 |
 | `0.86` | 33 | 16 |
 
-With `s = 3` on the same 49 steps, `t` falls below `0.9` after 13 steps and `D = 0.86` leaves 17
-dense steps instead of 33. Choose `D` by counting against the schedule actually served, not by reusing a value
-from a model with a different shift or step count.
+With `s = 3` on the same 49 steps, `t` falls below `0.9` after 13 steps and a cutoff of `0.86`
+leaves 17 dense steps instead of 33. Choose the cutoff by counting against the schedule actually
+served, not by reusing a value from a model with a different shift or step count.

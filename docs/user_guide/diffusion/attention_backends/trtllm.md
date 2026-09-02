@@ -174,26 +174,28 @@ vllm serve nvidia/Wan2.2-T2V-A14B-Diffusers-FP8 --omni \
 ### Timestep gating
 
 The early, high-noise denoising steps fix the global layout of the output, and
-their errors propagate through every later step. `disabled_until_timestep=D`
+their errors propagate through every later step. `disabled_until_timestep`
 keeps those steps dense and enables Skip-Softmax once the normalized timestep
-`t` satisfies `t <= D`. The default `0` is a sentinel that turns the gate off:
-Skip-Softmax runs on every step and no timestep needs to be published. `1.0`
-also leaves no step dense, but goes through the gate and therefore requires
-the pipeline to publish `t`.
+`t` reaches the configured cutoff. The default `0` is a sentinel that turns the
+gate off: Skip-Softmax runs on every step and no timestep needs to be
+published. `1.0` also leaves no step dense, but goes through the gate and
+therefore requires the pipeline to publish `t`.
 
 `t` is the scheduler's own timestep normalized to `[0, 1]`, published by the
 pipeline for each denoising step; for rectified-flow models it is the current
 sigma. It runs from near `1.0` down to `0.0`, but not linearly in the step
 index: flow-shifted schedules spend many of their steps at high `t`. The number
-of dense steps a given `D` produces therefore depends on the model's schedule
-and step count, and follows from the actual timestep sequence:
+of dense steps a given cutoff produces therefore depends on the model's
+schedule and step count, and follows from the actual timestep sequence:
 
 ```text
-dense_steps = count(t[i] > D)
+dense_steps = count(t[i] > disabled_until_timestep)
 ```
 
-Derive `D` from the schedule of the model you are serving rather than reusing
-another model's value.
+Derive the cutoff from the schedule of the model you are serving rather than
+reusing another model's value; the
+[feature design](../../../design/feature/skip_softmax.md#mapping-the-cutoff-to-denoising-steps)
+works through an example.
 
 A pipeline that does not publish `t` stays dense whenever
 `disabled_until_timestep > 0` is set, and logs a warning once. Pipelines
