@@ -106,8 +106,9 @@ Set `threshold` when the checkpoint carries no calibration. `threshold=0`
 skips nothing; larger values skip more tiles and lower output fidelity. Values
 around `0.05` are a reasonable first try for video DiTs; tune against dense
 output on the same prompt and seed. The value is independent of sequence
-length; the [feature design](../../../design/feature/skip_softmax.md#from-configuration-to-the-kernel-threshold)
-explains how it maps to the kernel's `threshold_scale_factor`.
+length; see the
+[feature design](../../../design/feature/skip_softmax.md#from-configuration-to-the-kernel-threshold)
+for how it reaches the kernel and how to port a TensorRT-LLM setting.
 
 ```bash
 vllm serve <model> --omni \
