@@ -153,6 +153,11 @@ turns it on once the normalized timestep `t` drops to `t ≤ D` (`t` runs `1.0` 
 schedule). The early steps set the global structure of the output and their errors propagate through
 every later step, so keeping them dense costs a few skipped-tile opportunities but protects fidelity.
 
+`D = 0`, the default, is a sentinel rather than a cutoff: `SkipSoftmaxConfig.gated` is false, the
+forward context's timestep is never read, and the factor is passed to the kernel on every call. Any
+`D > 0` goes through the gate, so `D = 1.0` also produces no dense steps on a publishing pipeline but
+falls back to dense when no timestep is published.
+
 `t` is published by the pipeline for each denoising step through
 `DenoiseProgressMixin.record_denoise_step`, which stores it as `denoise_timestep` on the forward
 context. Scheduler-based pipelines pass the scheduler timestep, which is normalized by

@@ -94,7 +94,7 @@ and its bounds.
 | --- | --- | --- |
 | `threshold` | `>= 0`; useful values in `(0, 1)` | Skip threshold, independent of sequence length. Calibration-free. |
 | `target_sparsity` | `[0, 1]` | Requested operating point on the checkpoint's calibrated curve. Requires calibration metadata. |
-| `disabled_until_timestep` | `[0, 1]`; default `0` | Keeps attention dense while the normalized timestep `t > D`. |
+| `disabled_until_timestep` | `[0, 1]`; default `0` | Keeps attention dense while the normalized timestep `t > D`; `0` disables the gate. |
 
 `threshold` and `target_sparsity` are two ways to set the same kernel
 threshold; setting both is a configuration error. Exactly one of them enables
@@ -158,7 +158,10 @@ vllm serve nvidia/Wan2.2-T2V-A14B-Diffusers-FP8 --omni \
 The early, high-noise denoising steps fix the global layout of the output, and
 their errors propagate through every later step. `disabled_until_timestep=D`
 keeps those steps dense and enables Skip-Softmax once the normalized timestep
-`t` satisfies `t <= D`. The default `D=0` applies Skip-Softmax to every step.
+`t` satisfies `t <= D`. The default `0` is a sentinel that turns the gate off:
+Skip-Softmax runs on every step and no timestep needs to be published. `1.0`
+also leaves no step dense, but goes through the gate and therefore requires
+the pipeline to publish `t`.
 
 `t` is the scheduler's own timestep normalized to `[0, 1]`. It starts near
 `1.0` and decreases to `0.0` over the schedule, published by the pipeline for
