@@ -62,18 +62,31 @@ Configure eight-way Ulysses alone as:
 A degree of `1` disables that sequence-parallel mode. It does not limit the
 server to one GPU or affect tensor, pipeline, or VAE parallelism.
 
-## Basic usage
+## Quick start
 
 On datacenter Blackwell the platform selects `TRTLLM_ATTN` by default when the
-model declares a compatible path. To select it explicitly:
+model declares a compatible path. To select it explicitly, for dense BF16:
 
 ```bash
 vllm serve <model> --omni \
   --diffusion-attention-backend TRTLLM_ATTN
 ```
 
-Without a `skip_softmax` or `quant` key this is dense BF16. The startup log
-reports the selection; look for one of:
+To enable both optimizations with a conservative Skip-Softmax setting and FP8
+SAGE:
+
+```bash
+vllm serve <model> --omni \
+  --diffusion-attention-config '{
+    "default": {
+      "backend": "TRTLLM_ATTN",
+      "quant": {"dtype_qk": "fp8_e4m3", "q_block_size": 1, "k_block_size": 16},
+      "skip_softmax": {"threshold": 0.05, "disabled_until_timestep": 0.97}
+    }
+  }'
+```
+
+The startup log reports the selection; look for one of:
 
 ```text
 Defaulting to diffusion attention backend TRTLLM_ATTN (datacenter Blackwell ..., head_dim 128)
