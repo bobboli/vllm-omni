@@ -120,7 +120,7 @@ around `0.05` are a reasonable first try for video DiTs; tune against dense
 output on the same prompt and seed. The value is independent of sequence
 length; see the
 [feature design](../../../design/feature/skip_softmax.md#from-configuration-to-the-kernel-threshold)
-for how it reaches the kernel and how to port a TensorRT-LLM setting.
+for how it reaches the kernel.
 
 ```bash
 vllm serve <model> --omni \

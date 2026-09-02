@@ -77,15 +77,6 @@ the same per-tile test at any resolution or frame count. `threshold=0` skips no 
 left-hand side of the skip test lies in `(0, 1]`, values in `(0, 1)` are the meaningful range; the
 schema accepts any finite non-negative value.
 
-TensorRT-LLM exposes the kernel's `threshold_scale_factor` directly. To port a setting from it:
-
-```text
-threshold = threshold_scale_factor / kv_sequence_length
-```
-
-A TensorRT-LLM `threshold_scale_factor=5000` on a 75k-token sequence corresponds to
-`threshold ≈ 0.067`.
-
 `target_sparsity` selects a point on a curve fitted per model by
 [NVIDIA ModelOpt](https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/diffusers/sparsity),
 so that `s` lands near that fraction of skipped tiles on the calibration data. The coefficients
