@@ -169,17 +169,17 @@ skip_softmax_steps = N - dense_steps
 
 This count depends entirely on the schedule, and schedules differ from model to model: the
 scheduler family, the number of steps, and any time shift all change where the steps land in `t`.
-The same cutoff can therefore gate a very different fraction of the run on two models. As one
-example, a flow-shifted rectified-flow schedule applies a shift `s` to `N + 1` uniform positions
-`u` from `1` to `0`,
+The same cutoff can therefore gate a very different fraction of the run on two models. Take
+MiniMax-H3 as an example. Its video branch uses a flow-shifted rectified-flow schedule that applies
+a shift `s` to `N + 1` uniform positions `u` from `1` to `0`,
 
 ```text
 t = s * u / (1 + (s - 1) * u)
 ```
 
-and a large `s` pushes most positions toward `t ≈ 1`. For `N = 49` steps (50 sigma points) and
-`s = 12`, the published sequence starts `1.000, 0.998, 0.996, 0.995, 0.993, ...` and stays above
-`0.9` for 28 steps, giving:
+and a large `s` pushes most positions toward `t ≈ 1`. With the default `s = 12` and
+`num_inference_steps = 50` (50 sigma points, `N = 49` denoiser forwards), the published sequence
+starts `1.000, 0.998, 0.996, 0.995, 0.993, ...` and stays above `0.9` for 28 steps, giving:
 
 | `disabled_until_timestep` | Dense steps | Skip-Softmax steps |
 | :---: | ---: | ---: |
@@ -191,6 +191,7 @@ and a large `s` pushes most positions toward `t ≈ 1`. For `N = 49` steps (50 s
 | `0.86` | 33 | 16 |
 
 These numbers hold only for that schedule. A model with a smaller shift, a different step count,
-or a scheduler that is not rectified flow produces a different sequence and a different table.
+or a scheduler that is not rectified flow produces a different sequence and a different table; a
+request that overrides `flow_shift` or the step count changes it for MiniMax-H3 too.
 Choose the cutoff by counting against the schedule actually served, not by reusing a value from
 another model.
