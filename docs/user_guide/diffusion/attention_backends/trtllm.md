@@ -141,21 +141,11 @@ not consumed; set them in the vLLM-Omni configuration. The
 [feature design](../../../design/feature/skip_softmax.md#calibration-data-flow)
 documents the checkpoint format and how the coefficients reach the kernel.
 
-To calibrate a checkpoint yourself, run the ModelOpt example with `--calibrate`
-and `--export-dir`. It writes a copy of the checkpoint with the coefficients
-embedded in each transformer component's `config.json`:
-
-```bash
-python examples/diffusers/sparsity/wan22_skip_softmax.py \
-    --model-path /path/to/Wan2.2-T2V-A14B-Diffusers \
-    --calibrate --target-sparsity 0.5 --calib-size 4 \
-    --export-dir /path/to/Wan2.2-T2V-A14B-Diffusers-skip-softmax \
-    --prompt "A cat playing piano" --output out.mp4
-```
-
-The fitted curve depends on the attention statistics of the calibration shape,
-so calibrate at the resolution and frame count you will serve. Serve the
-exported directory with `target_sparsity` as shown below.
+To calibrate a checkpoint yourself, follow the
+[ModelOpt Skip-Softmax example](https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/diffusers/sparsity),
+which exports a copy of the checkpoint with the coefficients embedded. The
+fitted curve depends on the attention statistics of the calibration shape, so
+calibrate at the resolution and frame count you will serve.
 
 Requesting `target_sparsity` for a checkpoint without calibration is a startup
 error that names the `threshold` alternative. The
