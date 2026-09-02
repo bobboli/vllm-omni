@@ -311,7 +311,10 @@ attention. Both work under the pure Ulysses parallelism of the profile above
   additionally supports `int8` Q/K, which preserves accuracy better than FP8.
 - Skip-Softmax on the calibration-free path with `threshold=0.05`. The H3
   checkpoint carries no ModelOpt calibration, so `target_sparsity` is not
-  available.
+  available. Together with the cutoff below this is a conservative setting:
+  a low threshold skips only clearly negligible tiles, and a cutoff close to
+  `1.0` leaves a substantial dense prefix. Raise `threshold` or lower
+  `disabled_until_timestep` for more speedup once quality is verified.
 - `disabled_until_timestep=0.97` keeps the early high-noise steps dense. The
   gate compares against the video sigma, which H3's default flow shift of 12
   keeps high for much of the run: at 50 steps, `0.99`, `0.97`, and `0.95`
