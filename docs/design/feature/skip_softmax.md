@@ -59,7 +59,7 @@ Two properties of the test shape the achievable speedup:
   depends on the attention scores and rounds down to tile granularity, so no configured value can
   promise a fixed skip ratio.
 
-## From configuration to `λ`
+## From configuration to the kernel threshold
 
 The FlashInfer kernel does not take `λ` directly. It takes a `threshold_scale_factor` and divides
 it by the KV sequence length of the call:
@@ -80,6 +80,15 @@ the same per-tile test at any resolution or frame count. `threshold=0` skips no 
 left-hand side of the skip test lies in `(0, 1]`, values in `(0, 1)` are the meaningful range; the
 schema accepts any finite non-negative value.
 
+TensorRT-LLM exposes the kernel's `threshold_scale_factor` directly. To port a setting from it:
+
+```text
+threshold = threshold_scale_factor / kv_sequence_length
+```
+
+A TensorRT-LLM `threshold_scale_factor=5000` on a 75k-token sequence corresponds to
+`threshold ≈ 0.067`.
+
 `target_sparsity` selects a point on a curve fitted per model by
 [NVIDIA ModelOpt](https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/diffusers/sparsity),
 so that `s` lands near that fraction of skipped tiles on the calibration data. The coefficients
@@ -88,8 +97,29 @@ differ.
 
 ### Calibration data flow
 
-Calibration is carried in the transformer's `config.json` under `sparse_attention_config` and is
-consumed in three steps:
+Calibration is carried in the transformer's `config.json` under `sparse_attention_config`, in the
+layout NVIDIA ModelOpt writes:
+
+```json
+{
+  "sparse_attention_config": {
+    "config_groups": {
+      "group_0": {
+        "algorithm": "skip_softmax",
+        "threshold_scale_factor": {
+          "formula": "a * exp(b * target_sparsity)",
+          "coefficients": {"a": 1000.0, "b": 5.0}
+        },
+        "ignore": ["blocks.0.attn1", "blocks.0.attn2"]
+      }
+    }
+  }
+}
+```
+
+`ignore` holds fnmatch patterns; each is matched against the full module name and against the name
+relative to the transformer component, so `blocks.0.attn1` matches both `transformer.blocks.0.attn1`
+and `transformer_2.blocks.0.attn1`. The metadata is consumed in three steps:
 
 1. **Parse.** At config construction, `propagate_skip_softmax_calibration` reads the
    `config_groups` entry whose `algorithm` is `skip_softmax`, extracts `coefficients.a`,

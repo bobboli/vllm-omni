@@ -100,29 +100,14 @@ and its bounds.
 threshold; setting both is a configuration error. Exactly one of them enables
 Skip-Softmax.
 
-### What the kernel consumes
-
-The FlashInfer kernel takes a `threshold_scale_factor` and divides it by the
-KV sequence length to obtain the per-tile skip threshold. vLLM-Omni exposes
-that per-tile threshold directly as `threshold` and multiplies by the sequence
-length internally, so the same `threshold` means the same per-tile test at any
-resolution or frame count.
-When porting a setting from TensorRT-LLM, which exposes the scale factor
-directly:
-
-```text
-threshold = threshold_scale_factor / kv_sequence_length
-```
-
-For example, a TensorRT-LLM `threshold_scale_factor=5000` on a 75k-token
-sequence corresponds to `threshold ≈ 0.067`.
-
 ### Direct threshold
 
-Set `threshold` when the checkpoint carries no calibration or when you want
-the kernel-level control. `threshold=0` skips nothing; larger values skip more
-tiles and lower output fidelity. Values around `0.05` are a reasonable first
-try for video DiTs; tune against dense output on the same prompt and seed.
+Set `threshold` when the checkpoint carries no calibration. `threshold=0`
+skips nothing; larger values skip more tiles and lower output fidelity. Values
+around `0.05` are a reasonable first try for video DiTs; tune against dense
+output on the same prompt and seed. The value is independent of sequence
+length; the [feature design](../../../design/feature/skip_softmax.md#from-configuration-to-the-kernel-threshold)
+explains how it maps to the kernel's `threshold_scale_factor`.
 
 ```bash
 vllm serve <model> --omni \
@@ -136,49 +121,24 @@ vllm serve <model> --omni \
 A fixed `threshold` does not produce a fixed fraction of skipped tiles because
 the score distribution changes with the model, prompt, and shape.
 [NVIDIA ModelOpt](https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/diffusers/sparsity)
-can calibrate a curve that maps a desired `target_sparsity` to the kernel
-scale factor and store it in the checkpoint's transformer `config.json`.
-`target_sparsity` then selects a point on that curve:
+can calibrate a per-model curve from sparsity to threshold and store it in the
+checkpoint's transformer `config.json` under `sparse_attention_config`.
+`target_sparsity` selects a point on that curve. The achieved sparsity still
+varies per prompt, layer, and denoising step; the calibration makes the
+requested value a meaningful target, not a guarantee.
 
-```text
-threshold_scale_factor = a * exp(b * target_sparsity)
-```
+What vLLM-Omni takes from the checkpoint:
 
-The achieved sparsity still varies per prompt, layer, and denoising step; the
-calibration makes the requested value a meaningful target, not a guarantee.
+- The curve coefficients. Only the `a * exp(b * target_sparsity)` form ModelOpt
+  writes is supported; another formula is rejected at startup.
+- The `ignore` list: attention layers matching those patterns stay dense.
+- For multi-expert Diffusers checkpoints, `transformer_2/config.json` is read
+  separately; if it is missing, `transformer_2` stays dense with a warning.
 
-vLLM-Omni reads the following from the checkpoint:
-
-```json
-{
-  "sparse_attention_config": {
-    "config_groups": {
-      "group_0": {
-        "algorithm": "skip_softmax",
-        "threshold_scale_factor": {
-          "formula": "a * exp(b * target_sparsity)",
-          "coefficients": {"a": 1000.0, "b": 5.0}
-        },
-        "ignore": ["blocks.0.attn1", "blocks.0.attn2"]
-      }
-    }
-  }
-}
-```
-
-- `formula` and `coefficients`: only the form `a * exp(b * target_sparsity)`
-  is supported; any other formula string is rejected at startup.
-- `ignore`: fnmatch patterns for attention modules that stay dense regardless
-  of the user configuration. Patterns match both the full module name and the
-  name relative to the transformer component.
-- Multi-expert Diffusers checkpoints are calibrated per component. The
-  `transformer/config.json` curve applies to `transformer`; a
-  `transformer_2/config.json` curve applies to `transformer_2`. If the second
-  file is missing or unreadable, `transformer_2` stays dense and a warning is
-  logged.
-- Checkpoint-level `target_sparsity` and `disabled_until_timestep` defaults,
-  which ModelOpt may also write, are not consumed; supply them in the vLLM-Omni
-  configuration.
+Checkpoint-level `target_sparsity` and `disabled_until_timestep` defaults are
+not consumed; set them in the vLLM-Omni configuration. The
+[feature design](../../../design/feature/skip_softmax.md#calibration-data-flow)
+documents the checkpoint format and how the coefficients reach the kernel.
 
 Requesting `target_sparsity` for a checkpoint without calibration is a startup
 error that names the `threshold` alternative. The
