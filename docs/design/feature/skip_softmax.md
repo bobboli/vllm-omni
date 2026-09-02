@@ -111,32 +111,27 @@ with the `ignore` list abridged:
 
 A checkpoint with several transformer components carries one such config per component, each
 with its own coefficients; in this example, `transformer_2/config.json` holds the low-noise
-expert's curve. vLLM-Omni reads `formula`, `coefficients`, and `ignore`. `ignore` holds
-fnmatch patterns; each is matched against the full module name and against the name relative to
-the transformer component, so `blocks.0.attn1` matches both `transformer.blocks.0.attn1` and
-`transformer_2.blocks.0.attn1`. `targets`, `target_sparsity`, and `disabled_until_timestep` are
-not consumed. The metadata is consumed in three steps:
+expert's curve.
 
-1. **Parse.** At config construction, `propagate_skip_softmax_calibration` reads the
-   `config_groups` entry whose `algorithm` is `skip_softmax`, extracts `coefficients.a`,
-   `coefficients.b`, and the `ignore` pattern list, and validates that `formula` is
-   `a*exp(b*target_sparsity)`. Any other formula is rejected. For Diffusers checkpoints with a
-   `transformer_2` component, `transformer_2/config.json` is read separately; if it is missing,
-   `transformer_2` stays dense. The result is attached to every `AttentionSpec` as
-   `skip_calibration`. If no calibration is found and a spec requests `target_sparsity`, startup
-   fails and the error names `threshold` as the calibration-free alternative.
+vLLM-Omni consumes `formula`, `coefficients`, and `ignore`, and ignores `targets`,
+`target_sparsity`, and `disabled_until_timestep`:
 
-2. **Stamp.** After model construction, `apply_skip_softmax_calibration` walks the pipeline's
-   modules. For each attention layer it selects the curve for the component the layer belongs to
-   (`transformer` or `transformer_2`), checks the layer name against the `ignore` patterns (both
-   the full name and the component-relative name are matched), and calls
-   `set_layer_calibration(a, b)` on the backend instance. Ignored layers never receive
-   coefficients and therefore never enable Skip-Softmax.
+- Only the formula `a * exp(b * target_sparsity)` is accepted; a checkpoint with any other formula
+  is rejected at startup. If a spec requests `target_sparsity` and the checkpoint carries no
+  calibration, startup fails and the error points to `threshold` as the calibration-free
+  alternative.
+- Each component's curve is applied to that component's attention layers. If the config for a
+  secondary component such as `transformer_2` cannot be read, that component stays dense and a
+  warning is logged.
+- `ignore` holds fnmatch patterns matched against both the full module name and the name relative
+  to the component, so `blocks.0.attn1` matches `transformer.blocks.0.attn1` as well as
+  `transformer_2.blocks.0.attn1`. Matching layers receive no coefficients and therefore stay dense
+  regardless of the user configuration.
 
-3. **Resolve.** On each attention call, `SkipSoftmaxConfig.resolve_factor` computes the factor
-   from `threshold` or from `(a, b, target_sparsity)`, applies the timestep gate below, and passes
-   the result to the kernel. A layer with `target_sparsity` but no stamped coefficients returns
-   `None` and runs dense.
+At each attention call, a layer with a `threshold` uses it directly; a layer with
+`target_sparsity` and stamped coefficients evaluates the curve; a layer with `target_sparsity` but
+no coefficients runs dense. The timestep gate below is applied to the result before it reaches the
+kernel.
 
 ## Timestep gating
 
