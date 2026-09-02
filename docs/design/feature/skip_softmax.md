@@ -136,10 +136,11 @@ kernel.
 ## Timestep gating
 
 The early, high-noise denoising steps set the global structure of the output, and their errors
-propagate through every later step. `disabled_until_timestep = D` keeps those steps dense: on each
-attention call the backend compares the current normalized timestep `t` against `D` and passes no
-skip factor to the kernel while `t > D`. Skip-Softmax becomes active on the first step with
-`t ≤ D` and stays active for the rest of the run, since `t` only decreases.
+propagate through every later step. Keeping just these steps dense markedly improves the quality
+of the generated video at a small cost in skipped work. `disabled_until_timestep = D` implements
+this: on each attention call the backend compares the current normalized timestep `t` against `D`
+and passes no skip factor to the kernel while `t > D`. Skip-Softmax becomes active on the first
+step with `t ≤ D` and stays active for the rest of the run, since `t` only decreases.
 
 `D = 0`, the default, is a sentinel rather than a cutoff: the gate is off, the timestep is never
 read, and Skip-Softmax runs on every step. Any `D > 0` enables the gate. `D = 1.0` therefore also
