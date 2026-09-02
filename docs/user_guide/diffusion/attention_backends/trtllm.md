@@ -82,15 +82,11 @@ Resolved diffusion attention backend 'TRTLLM_ATTN' for role='self' via attention
 
 ## Skip-Softmax
 
-Skip-Softmax, also published as BLASST, is a kernel-level sparse attention
-method. After a KV tile's scores are computed, the kernel compares the tile's
-maximum score with the running row maximum. If even the best key in the tile
-falls far enough below that maximum, the whole tile's Softmax and `PV` work is
-skipped. `QK^T` always runs, so the kernel can remove at most the Softmax and
-`PV` share of attention time, and the achieved sparsity depends on the
-attention scores of the actual input rather than on the configured value. The
-[feature design](../../../design/feature/skip_softmax.md) states the skip test
-and derives its bounds.
+Skip-Softmax (BLASST) skips the Softmax and `PV` work of KV tiles whose
+scores fall far below the running row maximum. `QK^T` always runs, and how
+many tiles qualify depends on the input. The
+[feature design](../../../design/feature/skip_softmax.md) gives the skip test
+and its bounds.
 
 ### Configuration keys
 
