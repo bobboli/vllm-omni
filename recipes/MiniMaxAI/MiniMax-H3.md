@@ -310,7 +310,7 @@ attention. Both work under the pure Ulysses parallelism of the profile above
 - SAGE with `fp8_e4m3` Q/K; P and V are always FP8 in this kernel. B200
   additionally supports `int8` Q/K, which preserves accuracy better than FP8.
 - Skip-Softmax with a direct `threshold=0.05`; the calibrated
-  `target_sparsity` control needs ModelOpt metadata that the released H3
+  `target_sparsity` control needs ModelOpt metadata that the official H3
   checkpoint does not include. Together with the cutoff below this is a
   **conservative** setting: a low threshold skips only clearly negligible tiles,
   and a cutoff close to `1.0` leaves a substantial dense prefix. Raise
