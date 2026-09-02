@@ -201,10 +201,11 @@ FP8 Q/K kernels exist on `sm100a` and `sm103a`; INT8 Q/K kernels exist on
 | `q_block_size` | `1`, `4`, `16` | Consecutive query tokens sharing one Q scale; default `1` |
 | `k_block_size` | `1`, `4`, `16` | Consecutive key tokens sharing one K scale; default `16` |
 
-Smaller blocks give finer scales and higher fidelity; larger blocks amortize
-scale handling and can be faster. Only the listed sizes have compiled kernels.
-When a KV sequence in a call is shorter than `k_block_size`, that call falls
-back to dense attention and a warning is logged once.
+Start with the defaults, `q_block_size=1` and `k_block_size=16`, and try
+smaller K blocks only if output quality does not meet expectations; smaller
+blocks give finer scales at some cost in speed. When a KV sequence in a call is
+shorter than `k_block_size`, that call falls back to dense attention and a
+warning is logged once.
 
 ```bash
 vllm serve <model> --omni \
