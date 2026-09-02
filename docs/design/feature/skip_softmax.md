@@ -35,19 +35,22 @@ and returns `O / l` at the end. For each KV tile it computes the scores `QK_j^T`
 accumulates the tile's contribution into `l` and `O`. Rescaling `l` and `O` when `m` grows keeps the
 dense pass numerically exact.
 
-BLASST inserts one test between computing a tile's scores and accumulating them. Let `tile_max` be
-the tile's largest score and `λ` the effective threshold:
+A tile is a block of query rows against a block of keys, and the kernel processes it as a unit.
+BLASST inserts one test between computing a tile's scores and accumulating them. For each query
+row `i` in the tile, let `tile_max[i]` be the row's largest score within the tile, `running_max[i]`
+the row's running maximum, and `λ` the effective threshold:
 
 ```text
-if exp(tile_max - running_max) < λ:
+if all(exp(tile_max[i] - running_max[i]) < λ for every row i in the tile):
     skip this tile          # do not compute its Softmax or PV contribution
 ```
 
-`exp(tile_max − running_max)` is an upper bound on the softmax weight any key in the tile can
-receive: if even the tile's best key is far below the current maximum, every key in the tile is
-unimportant, and both the Softmax and `PV` work for that tile can be skipped. The tile's
-contribution to `l` and `O` is simply omitted. A larger `λ` makes the test more aggressive. The
-figure states the same test in log space, `m̃ − m < ln(λ)`, which is how the kernel evaluates it.
+`exp(tile_max[i] − running_max[i])` is an upper bound on the softmax weight any key in the tile can
+receive in row `i`: if even the row's best key in this tile is far below the row's current maximum,
+the tile is unimportant for that row. Only when this holds for every row in the tile can the
+Softmax and `PV` work for the tile be skipped, in which case its contribution to `l` and `O` is
+simply omitted. A larger `λ` makes the test more aggressive. The figure states the same test in
+log space, `m̃ − m < ln(λ)`, which is how the kernel evaluates it.
 
 ## What this bounds
 
@@ -58,8 +61,9 @@ Two properties of the test shape the achievable speedup:
   value matmul have the same FLOP count, so even skipping every eligible tile removes roughly half
   the attention arithmetic; the kernel-level speedup is bounded well under 2×.
 
-- **The decision is per tile, not per key.** A tile is skipped only when *all* of its keys are
-  collectively unimportant; a single important key keeps the whole tile. How many tiles qualify
+- **The decision is per tile, not per key.** A tile is skipped only when it is unimportant for
+  *every* query row in it and *all* of its keys; a single important key in a single row keeps the
+  whole tile. How many tiles qualify
   depends on the attention scores and rounds down to tile granularity, so no configured value can
   promise a fixed skip ratio.
 
