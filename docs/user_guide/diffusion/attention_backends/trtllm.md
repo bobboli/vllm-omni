@@ -62,7 +62,7 @@ Configure eight-way Ulysses alone as:
 A degree of `1` disables that sequence-parallel mode. It does not limit the
 server to one GPU or affect tensor, pipeline, or VAE parallelism.
 
-## Dense usage
+## Basic usage
 
 On datacenter Blackwell the platform selects `TRTLLM_ATTN` by default when the
 model declares a compatible path. To select it explicitly:
