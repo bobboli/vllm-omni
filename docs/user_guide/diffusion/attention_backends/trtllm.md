@@ -7,12 +7,12 @@ dense performance is on par with
 provides two opt-in, lossy acceleration modes that can be enabled independently
 or together:
 
-| Mode | Config block | What it changes |
+| Mode | Config key | What it changes |
 | --- | --- | --- |
 | [Skip-Softmax](#skip-softmax) | `skip_softmax` | Skips the Softmax and `PV` work of KV tiles whose scores are too low to matter |
 | [SAGE quantization](#sage-quantization) | `quant` | Runs `QK^T` in INT8 or FP8 and `PV` in FP8 instead of BF16 |
 
-Both blocks are passed through `--diffusion-attention-config`, as JSON or as
+Both keys are set through `--diffusion-attention-config`, as JSON or as
 vLLM-style dotted flags; the
 [attention backend overview](../attention_backends.md#configuration) covers
 both syntaxes and per-role resolution. The examples on this page use JSON.
@@ -48,7 +48,7 @@ call, but the local computation still goes through the configured backend, so
 both optional modes work unchanged. Ring and AllGather-KV do not:
 
 - Ring runs its own distributed attention and bypasses the backend. Combining
-  Ring with a `skip_softmax` block raises; a `quant` block would be silently
+  Ring with a `skip_softmax` key raises; a `quant` key would be silently
   ignored, so do not combine them either.
 - AllGather-KV changes the Q/KV distribution and is rejected when
   `TRTLLM_ATTN` is selected.
@@ -72,7 +72,7 @@ vllm serve <model> --omni \
   --diffusion-attention-backend TRTLLM_ATTN
 ```
 
-Without a `skip_softmax` or `quant` block this is dense BF16. The startup log
+Without a `skip_softmax` or `quant` key this is dense BF16. The startup log
 reports the selection; look for one of:
 
 ```text
@@ -245,7 +245,7 @@ SAGE quantization follows the SageAttention2 recipe: Q and K are quantized to
 INT8 or FP8 E4M3 for `QK^T`, and P and V use FP8 E4M3 for `PV`. P is quantized
 inside the FMHA kernel; V is quantized per channel before the kernel call.
 vLLM-Omni exposes the Q/K dtype and the Q/K scale granularity. The P and V
-formats are fixed by the kernel, so the `quant` block has no V dtype for this
+formats are fixed by the kernel, so the `quant` key has no V dtype for this
 backend. This mode is distinct from the standalone
 [SageAttention backends](sage.md), which use their own kernels.
 
@@ -270,7 +270,7 @@ vllm serve <model> --omni \
     "dtype_qk":"fp8_e4m3","q_block_size":1,"k_block_size":16}}}'
 ```
 
-The `quant` block is shared with `FLASHINFER_ATTN`, but each backend validates
+The `quant` key is shared with `FLASHINFER_ATTN`, but each backend validates
 its own fields: `float16`/`bfloat16` Q/K dtypes and `dtype_vo` are
 `FLASHINFER_ATTN` options and are rejected here.
 
