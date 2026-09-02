@@ -135,24 +135,56 @@ kernel.
 
 ## Timestep gating
 
-`disabled_until_timestep = D` keeps the mode off during the early, high-noise denoise steps and
-turns it on once the normalized timestep `t` drops to `t ≤ D` (`t` runs `1.0` → `0.0` over the
-schedule). The early steps set the global structure of the output and their errors propagate through
-every later step, so keeping them dense costs a few skipped-tile opportunities but protects fidelity.
+The early, high-noise denoising steps set the global structure of the output, and their errors
+propagate through every later step. `disabled_until_timestep = D` keeps those steps dense: on each
+attention call the backend compares the current normalized timestep `t` against `D` and passes no
+skip factor to the kernel while `t > D`. Skip-Softmax becomes active on the first step with
+`t ≤ D` and stays active for the rest of the run, since `t` only decreases.
 
-`D = 0`, the default, is a sentinel rather than a cutoff: `SkipSoftmaxConfig.gated` is false, the
-forward context's timestep is never read, and the factor is passed to the kernel on every call. Any
-`D > 0` goes through the gate, so `D = 1.0` also produces no dense steps on a publishing pipeline but
-falls back to dense when no timestep is published.
+`D = 0`, the default, is a sentinel rather than a cutoff: the gate is off, the timestep is never
+read, and Skip-Softmax runs on every step. Any `D > 0` enables the gate. `D = 1.0` therefore also
+yields no dense steps on a pipeline that publishes `t`, but on a pipeline that does not publish it
+the backend stays dense and logs a warning once rather than guessing from the step index.
 
-`t` is published by the pipeline for each denoising step through
-`DenoiseProgressMixin.record_denoise_step`, which stores it as `denoise_timestep` on the forward
-context. Scheduler-based pipelines pass the scheduler timestep, which is normalized by
-`num_train_timesteps`; rectified-flow pipelines such as MiniMax-H3 publish the current sigma
-directly. In both cases `t` follows the scheduler's own trajectory rather than the step index, so
-a given `D` yields a model-dependent number of dense steps: flow-shifted schedules spend many
-steps at high `t`. Count dense steps from the published sequence, `count(t[i] > D)`, for the
-schedule and step count actually served.
+### Where `t` comes from
 
-When `D > 0` is set and the pipeline has not published a timestep, the backend stays dense and
-logs a warning once rather than guessing from the step index.
+The pipeline publishes `t` once per denoising step before running the transformer. It is the
+scheduler's own position in `[0, 1]`, decreasing from near `1.0` (pure noise) to `0.0` (clean
+sample): scheduler-based pipelines publish the scheduler timestep divided by `num_train_timesteps`,
+and rectified-flow pipelines publish the current sigma. `t` is deliberately not the step index
+divided by the step count. Schedulers place their steps non-uniformly in `t`, so expressing the
+cutoff in `t` keeps a given `D` tied to the same noise level across step counts and schedulers.
+
+### Mapping `D` to denoising steps
+
+For a run whose published sequence is `t[0], ..., t[N-1]`, the number of dense steps is
+
+```text
+dense_steps = count(t[i] > D)
+skip_softmax_steps = N - dense_steps
+```
+
+This count depends on the schedule, so the same `D` can gate a very different fraction of the run
+on two models. Flow-shifted rectified-flow schedules are the common case: with a shift `s` applied
+to `N + 1` uniform positions `u` from `1` to `0`,
+
+```text
+t = s * u / (1 + (s - 1) * u)
+```
+
+and a large `s` pushes most positions toward `t ≈ 1`. For `N = 49` steps (50 sigma points) and
+`s = 12`, the published sequence starts `1.000, 0.998, 0.996, 0.995, 0.993, ...` and stays above
+`0.9` for 28 steps, giving:
+
+| `D` | Dense steps | Skip-Softmax steps |
+| :---: | ---: | ---: |
+| `1.00` | 0 | 49 |
+| `0.99` | 6 | 43 |
+| `0.97` | 14 | 35 |
+| `0.95` | 19 | 30 |
+| `0.90` | 28 | 21 |
+| `0.86` | 33 | 16 |
+
+With `s = 3` on the same 49 steps, `t` falls below `0.9` after 13 steps and `D = 0.86` leaves 17
+dense steps instead of 33. Choose `D` by counting against the schedule actually served, not by reusing a value
+from a model with a different shift or step count.
