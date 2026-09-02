@@ -12,6 +12,11 @@ or together:
 | [Skip-Softmax](#skip-softmax) | `skip_softmax` | Skips the Softmax and `PV` work of KV tiles whose scores are too low to matter |
 | [SAGE quantization](#sage-quantization) | `quant` | Runs `QK^T` in INT8 or FP8 and `PV` in FP8 instead of BF16 |
 
+Both blocks are passed through `--diffusion-attention-config`, as JSON or as
+vLLM-style dotted flags; the
+[attention backend overview](../attention_backends.md#configuration) covers
+both syntaxes and per-role resolution. The examples on this page use JSON.
+
 Attention computes scores `S = QK^T`, probabilities `P = softmax(S)`, and the
 output `O = PV`. SAGE lowers the precision of both matrix multiplications.
 Skip-Softmax keeps `QK^T` dense and removes the Softmax and `PV` work for
@@ -74,11 +79,6 @@ reports the selection; look for one of:
 Defaulting to diffusion attention backend TRTLLM_ATTN (datacenter Blackwell ..., head_dim 128)
 Resolved diffusion attention backend 'TRTLLM_ATTN' for role='self' via attention_config.default
 ```
-
-Both modes below are configured through `--diffusion-attention-config`, which
-accepts JSON or vLLM-style dotted flags. The examples use JSON; the dotted
-form of the first Skip-Softmax example is
-`--diffusion-attention-config.default.skip_softmax.threshold 0.05`.
 
 ## Skip-Softmax
 
