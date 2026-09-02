@@ -44,17 +44,18 @@ compatible FlashAttention 3 or 2 path.
 
 ## `TRTLLM_ATTN`
 
-`TRTLLM_ATTN` runs FlashInfer's trtllm-gen FMHA kernels and is the default on
-datacenter Blackwell. Without additional backend configuration, it runs dense
-BF16 attention.
+`TRTLLM_ATTN` runs FlashInfer's trtllm-gen FMHA kernels and is the platform
+default on datacenter Blackwell for models that declare a compatible attention
+path. Selected without a `quant` or `skip_softmax` block, it runs dense BF16
+attention at FA4-level performance.
 
 ```bash
 vllm serve <model> --omni \
   --diffusion-attention-backend TRTLLM_ATTN
 ```
 
-See [TRTLLM Attention](trtllm.md) for its hardware and layout requirements and
-its optional SAGE quantization and Skip-Softmax modes.
+See [TRTLLM Attention](trtllm.md) for its requirements and for the optional
+SAGE quantization and Skip-Softmax modes.
 
 ## `CUDNN_ATTN`
 

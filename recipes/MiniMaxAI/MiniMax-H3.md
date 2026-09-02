@@ -302,18 +302,24 @@ With the optional `[fa4]` dependency installed, `FLASH_ATTN` prefers FA4 on
 Blackwell. Confirm the server log contains `Using CuTe FlashAttention-4 on
 Blackwell` before recording FA4 measurements.
 
-`TRTLLM_ATTN` additionally supports two **lossy** optimizations for the long main
-DiT attention sequence: SAGE attention quantization and Skip-Softmax Sparse
-Attention. SAGE quantizes Q/K to the configured dtype and V to FP8. This example uses
-`fp8_e4m3` for Q/K; B200 also supports `int8` Q/K. The TRTLLM SAGE path fixes V
-to FP8, so vLLM-Omni only exposes the Q/K dtype. The token refiner is a short
-attention path, so the `per_role` override leaves SAGE and Skip-Softmax disabled
-for it. The example enables both optimizations and uses the calibration-free
-Skip-Softmax path with `threshold=0.05`. `disabled_until_timestep=0.97` keeps
-Skip-Softmax disabled while normalized `t > 0.97` and enables it once
-`t <= 0.97`; `t` decreases from `1.0` to `0.0` and is not a denoising-step
-fraction. Both optimizations require pure Ulysses sequence parallelism; the
-profile above uses `--usp 4 --ring 1`:
+`TRTLLM_ATTN` additionally offers two **lossy** optimizations for the long main
+DiT attention sequence: SAGE attention quantization and Skip-Softmax sparse
+attention. Both work under the pure Ulysses parallelism of the profile above
+(`--usp 4 --ring 1`). The example below enables both:
+
+- SAGE with `fp8_e4m3` Q/K (B200 additionally supports `int8`); P and V are
+  always FP8 in this kernel.
+- Skip-Softmax on the calibration-free path with `threshold=0.05`. The H3
+  checkpoint carries no ModelOpt calibration, so `target_sparsity` is not
+  available.
+- `disabled_until_timestep=0.97`. H3's default video flow shift of 12 keeps the
+  normalized timestep above `0.97` for the first 14 of 49 denoiser evaluations
+  at 50 steps, so those steps stay dense and the remaining 35 use Skip-Softmax.
+  Lower values leave more steps dense; see the
+  [gating table](https://github.com/vllm-project/vllm-omni/blob/main/docs/user_guide/diffusion/attention_backends/trtllm.md#timestep-gating).
+- A `per_role` entry that keeps the token refiner, a short attention path,
+  dense. A per-role spec does not inherit `quant` or `skip_softmax` from
+  `default`.
 
 ```bash
 --diffusion-attention-config '{
@@ -337,10 +343,13 @@ profile above uses `--usp 4 --ring 1`:
 }'
 ```
 
-For configuration details, see
-[Skip-Softmax Sparse Attention](https://github.com/vllm-project/vllm-omni/blob/main/docs/user_guide/diffusion/attention_backends/trtllm.md#skip-softmax)
+Both optimizations trade fidelity for speed and their effects compound.
+Compare against dense output on the same prompt and seed before adopting them.
+For the full key reference, see
+[Skip-Softmax](https://github.com/vllm-project/vllm-omni/blob/main/docs/user_guide/diffusion/attention_backends/trtllm.md#skip-softmax)
 and
-[TRTLLM_ATTN SAGE Quantization](https://github.com/vllm-project/vllm-omni/blob/main/docs/user_guide/diffusion/attention_backends/trtllm.md#sage-quantization).
+[SAGE quantization](https://github.com/vllm-project/vllm-omni/blob/main/docs/user_guide/diffusion/attention_backends/trtllm.md#sage-quantization)
+in the TRTLLM attention guide.
 
 ### Text encoder tensor parallelism
 

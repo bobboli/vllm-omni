@@ -1,109 +1,130 @@
 # TRTLLM Attention
 
-`TRTLLM_ATTN` runs FlashInfer's trtllm-gen FMHA kernels. It currently targets
-Blackwell data center GPUs (`sm100a`/`sm103a`). Its dense BF16 performance is
-on par with [FlashAttention-4](dense_backends.md#flashattention-4-on-blackwell).
-Additionally, it supports two opt-in, lossy acceleration modes:
-[Skip-Softmax Sparse Attention](#skip-softmax) and
-[SAGE quantization](#sage-quantization). They can be enabled independently or
-together.
+`TRTLLM_ATTN` runs FlashInfer's trtllm-gen FMHA kernels on datacenter
+Blackwell GPUs. Selected on its own it computes dense BF16 attention, and its
+dense performance is on par with
+[FlashAttention-4](dense_backends.md#flashattention-4-on-blackwell). It also
+provides two opt-in, lossy acceleration modes that can be enabled independently
+or together:
 
-## Requirements and limitations
+| Mode | Config block | What it changes |
+| --- | --- | --- |
+| [Skip-Softmax](#skip-softmax) | `skip_softmax` | Skips the Softmax and `PV` work of KV tiles whose scores are too low to matter |
+| [SAGE quantization](#sage-quantization) | `quant` | Runs `QK^T` in INT8 or FP8 and `PV` in FP8 instead of BF16 |
 
-In addition to one of the target GPUs above, `TRTLLM_ATTN` requires:
+Attention computes scores `S = QK^T`, probabilities `P = softmax(S)`, and the
+output `O = PV`. SAGE lowers the precision of both matrix multiplications.
+Skip-Softmax keeps `QK^T` dense and removes the Softmax and `PV` work for
+tiles that `QK^T` shows to be unimportant. The two modes therefore compose:
+SAGE makes every tile cheaper, and Skip-Softmax reduces the number of tiles
+that reach the second half of the kernel.
 
+## Requirements
+
+`TRTLLM_ATTN` requires all of the following:
+
+- an `sm100a` or `sm103a` GPU (B200, B300, GB200, GB300); workstation Blackwell
+  (`sm120`/`sm121`) is not supported;
 - `head_dim=128`;
-- a FlashInfer build that exposes the trtllm-gen kernels; and
-- an attention path that is mask-free or provides supported packed metadata.
+- a FlashInfer build that exposes the trtllm-gen kernels (0.6.16rc1 or newer
+  for SAGE);
+- an attention path that is mask-free or provides packed-padding metadata.
+  Structural suffix padding is expressed through that metadata rather than an
+  `attn_mask` tensor.
 
-`TRTLLM_ATTN` handles structural suffix padding through packed-padding
-metadata rather than `attn_mask` tensors.
+An explicit selection that violates these requirements raises at startup
+instead of silently falling back to another backend.
 
 ### Sequence parallelism
 
-`TRTLLM_ATTN` supports either no sequence parallelism or pure Ulysses sequence
-parallelism. Ulysses redistributes the sequence and attention heads before and
-after attention, but still invokes the configured attention backend for the
-local computation.
+`TRTLLM_ATTN` runs under no sequence parallelism or under pure Ulysses.
+Ulysses redistributes the sequence and attention heads around the attention
+call, but the local computation still goes through the configured backend, so
+both optional modes work unchanged. Ring and AllGather-KV do not:
 
-Ring and AllGather-KV cannot be combined with `TRTLLM_ATTN`:
+- Ring runs its own distributed attention and bypasses the backend. Combining
+  Ring with a `skip_softmax` block raises; a `quant` block would be silently
+  ignored, so do not combine them either.
+- AllGather-KV changes the Q/KV distribution and is rejected when
+  `TRTLLM_ATTN` is selected.
 
-- Ring uses a separate distributed attention implementation instead of the
-  configured backend.
-- AllGather-KV changes the Q/KV distribution and is explicitly rejected by
-  `TRTLLM_ATTN`.
-
-For example, configure eight-way Ulysses without Ring or AllGather-KV as:
+Configure eight-way Ulysses alone as:
 
 ```bash
 --usp 8 --ring 1 --allgather-degree 1
 ```
 
-A parallel degree of `1` disables that sequence-parallel mode; it does not
-limit the server to one GPU or disable other forms of parallelism.
+A degree of `1` disables that sequence-parallel mode. It does not limit the
+server to one GPU or affect tensor, pipeline, or VAE parallelism.
 
-## Basic usage
+## Dense usage
 
-Select `TRTLLM_ATTN` explicitly with:
+On datacenter Blackwell the platform selects `TRTLLM_ATTN` by default when the
+model declares a compatible path. To select it explicitly:
 
 ```bash
 vllm serve <model> --omni \
   --diffusion-attention-backend TRTLLM_ATTN
 ```
 
-Without additional backend configuration, this runs dense BF16 attention. The
-platform may also select `TRTLLM_ATTN` automatically when model metadata
-declares a compatible path. Confirm the selection in the startup log:
+Without a `skip_softmax` or `quant` block this is dense BF16. The startup log
+reports the selection; look for one of:
 
 ```text
+Defaulting to diffusion attention backend TRTLLM_ATTN (datacenter Blackwell ..., head_dim 128)
 Resolved diffusion attention backend 'TRTLLM_ATTN' for role='self' via attention_config.default
 ```
 
-Dense attention computes the scores `S = QK^T`, the probabilities
-`P = softmax(S)`, and the output `O = PV`. SAGE lowers the precision of both
-matrix multiplications, while Skip-Softmax avoids selected Softmax and `PV`
-work after the scores are available.
+Both modes below are configured through `--diffusion-attention-config`, which
+accepts JSON or vLLM-style dotted flags. The examples use JSON; the dotted
+form of the first Skip-Softmax example is
+`--diffusion-attention-config.default.skip_softmax.threshold 0.05`.
 
 ## Skip-Softmax
 
-Skip-Softmax uses the `QK^T` scores to identify unimportant KV tiles, then
-skips the Softmax and `PV` work for those tiles. `QK^T` still runs. A larger
-`threshold` skips more tiles and is more aggressive, but the achieved sparsity
-depends on the attention scores and is not fixed by the configured value. See
-the [feature design](../../../design/feature/skip_softmax.md) for the algorithm.
+Skip-Softmax, also published as BLASST, is a kernel-level sparse attention
+method. After a KV tile's scores are computed, the kernel compares the tile's
+maximum score with the running row maximum. If even the best key in the tile
+would receive a softmax weight below a threshold `λ`, the tile's Softmax and
+`PV` work is skipped. `QK^T` always runs, so the kernel can remove at most the
+Softmax and `PV` share of attention time, and the achieved sparsity depends on
+the attention scores of the actual input rather than on the configured value.
+The [feature design](../../../design/feature/skip_softmax.md) derives the test
+and its bounds.
 
-| Key | Range | Effect |
+### Configuration keys
+
+| Key | Range | Meaning |
 | --- | --- | --- |
-| `threshold` | recommended `[0, 1]` | Direct threshold; larger values skip more KV tiles |
-| `target_sparsity` | `[0, 1]` | Requested point on a checkpoint-calibrated curve, not an exact skip ratio |
-| `disabled_until_timestep` | finite, `[0, 1]` | `0` applies the mode throughout; `D > 0` keeps it off while normalized `t > D` |
+| `threshold` | `>= 0`; useful values in `(0, 1)` | Sets `λ` directly. Calibration-free. |
+| `target_sparsity` | `[0, 1]` | Requested operating point on the checkpoint's calibrated curve. Requires calibration metadata. |
+| `disabled_until_timestep` | `[0, 1]`; default `0` | Keeps attention dense while the normalized timestep `t > D`. |
 
-> **Important: mutually exclusive controls**
->
-> `threshold` and `target_sparsity` cannot be set together. To enable
-> Skip-Softmax, configure exactly one of them in each attention spec.
+`threshold` and `target_sparsity` are two ways to obtain the same `λ`; setting
+both is a configuration error. Exactly one of them enables Skip-Softmax.
 
-A fixed threshold does not produce fixed sparsity because the attention-score
-distribution changes with the model, input, and shape. NVIDIA ModelOpt can
-calibrate a formula that maps a desired `target_sparsity` to the threshold and
-store the coefficients in the checkpoint:
+### What the kernel consumes
 
-- Use `target_sparsity` when this calibration metadata is available. It
-  expresses how aggressively to skip as an intuitive target, but the actual
-  fraction of skipped KV tiles can still vary. See the
-  [NVIDIA ModelOpt Wan2.2 FP8 transformer configuration](https://huggingface.co/nvidia/Wan2.2-T2V-A14B-Diffusers-FP8/blob/main/transformer/config.json)
-  for an example. Configuration fails at startup if the checkpoint does not
-  contain the required coefficients.
-- Without calibration metadata, set `threshold` directly. It is the value used
-  by the skip test; users do not need to apply sequence-length scaling. Larger
-  values skip more KV tiles and may reduce output quality.
+The FlashInfer kernel takes a `threshold_scale_factor` and divides it by the
+KV sequence length to obtain `λ`. vLLM-Omni exposes `λ` itself as `threshold`
+and performs the multiplication by sequence length internally, so the same
+`threshold` means the same per-tile test at any resolution or frame count.
+When porting a setting from TensorRT-LLM, which exposes the scale factor
+directly:
 
-The optional timestep gate protects early, high-noise denoising. Normalized
-`t` decreases from `1.0` to `0.0` and is not a denoising-step fraction. When
-`disabled_until_timestep=D > 0`, Skip-Softmax activates once `t <= D`; a
-pipeline that does not publish `t` stays dense.
+```text
+threshold = threshold_scale_factor / kv_sequence_length
+```
 
-This calibration-free example uses illustrative values:
+For example, a TensorRT-LLM `threshold_scale_factor=5000` on a 75k-token
+sequence corresponds to `threshold ≈ 0.067`.
+
+### Direct threshold
+
+Set `threshold` when the checkpoint carries no calibration or when you want
+the kernel-level control. `threshold=0` skips nothing; larger values skip more
+tiles and lower output fidelity. Values around `0.05` are a reasonable first
+try for video DiTs; tune against dense output on the same prompt and seed.
 
 ```bash
 vllm serve <model> --omni \
@@ -112,29 +133,135 @@ vllm serve <model> --omni \
     "threshold":0.05,"disabled_until_timestep":0.97}}}'
 ```
 
+### Calibrated target sparsity
+
+A fixed `λ` does not produce a fixed fraction of skipped tiles because the
+score distribution changes with the model, prompt, and shape.
+[NVIDIA ModelOpt](https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/diffusers/sparsity)
+can calibrate a curve that maps a desired `target_sparsity` to the kernel
+scale factor and store it in the checkpoint's transformer `config.json`.
+`target_sparsity` then selects a point on that curve:
+
+```text
+threshold_scale_factor = a * exp(b * target_sparsity)
+```
+
+The achieved sparsity still varies per prompt, layer, and denoising step; the
+calibration makes the requested value a meaningful target, not a guarantee.
+
+vLLM-Omni reads the following from the checkpoint:
+
+```json
+{
+  "sparse_attention_config": {
+    "config_groups": {
+      "group_0": {
+        "algorithm": "skip_softmax",
+        "threshold_scale_factor": {
+          "formula": "a * exp(b * target_sparsity)",
+          "coefficients": {"a": 1000.0, "b": 5.0}
+        },
+        "ignore": ["blocks.0.attn1", "blocks.0.attn2"]
+      }
+    }
+  }
+}
+```
+
+- `formula` and `coefficients`: only the form `a * exp(b * target_sparsity)`
+  is supported; any other formula string is rejected at startup.
+- `ignore`: fnmatch patterns for attention modules that stay dense regardless
+  of the user configuration. Patterns match both the full module name and the
+  name relative to the transformer component.
+- Multi-expert Diffusers checkpoints are calibrated per component. The
+  `transformer/config.json` curve applies to `transformer`; a
+  `transformer_2/config.json` curve applies to `transformer_2`. If the second
+  file is missing or unreadable, `transformer_2` stays dense and a warning is
+  logged.
+- Checkpoint-level `target_sparsity` and `disabled_until_timestep` defaults,
+  which ModelOpt may also write, are not consumed; supply them in the vLLM-Omni
+  configuration.
+
+Requesting `target_sparsity` for a checkpoint without calibration is a startup
+error that names the `threshold` alternative. The
+[ModelOpt Wan2.2 FP8 checkpoint](https://huggingface.co/nvidia/Wan2.2-T2V-A14B-Diffusers-FP8/blob/main/transformer/config.json)
+is a calibrated example:
+
+```bash
+vllm serve nvidia/Wan2.2-T2V-A14B-Diffusers-FP8 --omni \
+  --diffusion-attention-config \
+  '{"default":{"backend":"TRTLLM_ATTN","skip_softmax":{
+    "target_sparsity":0.75,"disabled_until_timestep":0.86}}}'
+```
+
+`target_sparsity=0.75` with `disabled_until_timestep=0.86` is the
+conservative operating point in NVIDIA's Wan2.2 characterization; raise
+`target_sparsity` or `disabled_until_timestep` from there once quality is
+verified.
+
+### Timestep gating
+
+The early, high-noise denoising steps fix the global layout of the output, and
+their errors propagate through every later step. `disabled_until_timestep=D`
+keeps those steps dense and enables Skip-Softmax once the normalized timestep
+`t` satisfies `t <= D`. The default `D=0` applies Skip-Softmax to every step.
+
+`t` is the scheduler's own timestep normalized to `[0, 1]`. It starts near
+`1.0` and decreases to `0.0` over the schedule, published by the pipeline for
+each denoising step. For rectified-flow models it is the current sigma. It is
+deliberately not the step index divided by the step count: flow-shifted
+schedules spend many steps at high `t`, so the number of dense steps a given
+`D` produces depends on the model's schedule. Count it from the actual
+sequence `t[0], ..., t[N-1]`:
+
+```text
+dense_steps = count(t[i] > D)
+```
+
+For MiniMax-H3 with its default video shift of 12 and a 50-point schedule (49
+denoiser evaluations), the shifted sigmas stay above `0.9` for more than half
+of the run:
+
+| `disabled_until_timestep` | Dense steps | Skip-Softmax steps |
+| :---: | ---: | ---: |
+| `1.00` | 0 | 49 |
+| `0.99` | 6 | 43 |
+| `0.97` | 14 | 35 |
+| `0.95` | 19 | 30 |
+| `0.90` | 28 | 21 |
+| `0.86` | 33 | 16 |
+
+By contrast, a 40-step Wan2.2 UniPC schedule with flow shift 3 reaches
+`t=0.86` after 14 steps, so the same `D` gates a very different fraction of
+the run. Pick `D` from your model's schedule, not from another model's recipe.
+
+A pipeline that does not publish `t` stays dense whenever
+`disabled_until_timestep > 0` is set, and logs a warning once. Pipelines
+publish it through `DenoiseProgressMixin.record_denoise_step`.
+
 ## SAGE quantization
 
-TRTLLM SAGE quantizes Q and K to the configured `dtype_qk` for `QK^T`. For the
-second matrix multiplication, P and V use FP8 E4M3. P quantization happens
-inside the FMHA kernel, and V is quantized per channel before the kernel call.
-vLLM exposes Q/K precision and scale granularity; P and V have no separate
-configuration knobs. This is a mode of `TRTLLM_ATTN`, distinct from the
-standalone [SageAttention backends](sage.md).
+SAGE quantization follows the SageAttention2 recipe: Q and K are quantized to
+INT8 or FP8 E4M3 for `QK^T`, and P and V use FP8 E4M3 for `PV`. P is quantized
+inside the FMHA kernel; V is quantized per channel before the kernel call.
+vLLM-Omni exposes the Q/K dtype and the Q/K scale granularity. The P and V
+formats are fixed by the kernel, so the `quant` block has no V dtype for this
+backend. This mode is distinct from the standalone
+[SageAttention backends](sage.md), which use their own kernels.
 
-This path requires FlashInfer 0.6.16rc1 or newer. FP8 Q/K kernels are available
-on `sm100a` and `sm103a`; INT8 Q/K kernels are available on `sm100a` only.
+FP8 Q/K kernels exist on `sm100a` and `sm103a`; INT8 Q/K kernels exist on
+`sm100a` only.
 
 | Key | Values | Meaning |
 | --- | --- | --- |
-| `dtype_qk` | `int8`, `fp8_e4m3` | Q/K quantization dtype |
-| `q_block_size` | `1`, `4`, `16` | Consecutive query tokens that share a Q scale; default `1` |
-| `k_block_size` | `1`, `4`, `16` | Consecutive key tokens that share a K scale; default `16` |
+| `dtype_qk` | `int8`, `fp8_e4m3` | Q/K quantization dtype. Setting it enables SAGE. |
+| `q_block_size` | `1`, `4`, `16` | Consecutive query tokens sharing one Q scale; default `1` |
+| `k_block_size` | `1`, `4`, `16` | Consecutive key tokens sharing one K scale; default `16` |
 
-Smaller blocks use finer-grained scales; larger blocks share each scale across
-more tokens. The available choices correspond to compiled kernel variants and
-can differ in both performance and fidelity. Every real KV sequence must
-contain at least `k_block_size` tokens; otherwise SAGE quantization is disabled
-for that attention call and a warning is emitted once.
+Smaller blocks give finer scales and higher fidelity; larger blocks amortize
+scale handling and can be faster. Only the listed sizes have compiled kernels.
+When a KV sequence in a call is shorter than `k_block_size`, that call falls
+back to dense attention and a warning is logged once.
 
 ```bash
 vllm serve <model> --omni \
@@ -143,19 +270,41 @@ vllm serve <model> --omni \
     "dtype_qk":"fp8_e4m3","q_block_size":1,"k_block_size":16}}}'
 ```
 
-## Tuning and composition
+The `quant` block is shared with `FLASHINFER_ATTN`, but each backend validates
+its own fields: `float16`/`bfloat16` Q/K dtypes and `dtype_vo` are
+`FLASHINFER_ATTN` options and are rejected here.
 
-`skip_softmax` and `quant` may coexist in one `AttentionSpec`, but their quality
-effects compound. Establish a dense baseline, enable and tune one mode at a
-time, then evaluate the combination with the same prompt and seed.
+## Composing both modes
 
-The examples above configure the shared `default` attention spec. Use
-`per_role` to keep short or sensitive attention sites dense; a per-role spec
-containing only `{"backend":"TRTLLM_ATTN"}` does not inherit `quant` or
-`skip_softmax` from `default`. See the
-[attention backend overview](../attention_backends.md#configuration) for the
-resolution order and Python API.
+`skip_softmax` and `quant` may appear in the same `AttentionSpec`. Their
+quality effects compound, so establish a dense baseline, enable one mode at a
+time, and then evaluate the combination on the same prompts and seeds.
 
-End-to-end speedup depends on the model's time in attention, sequence lengths,
-selected precision, and achieved tile sparsity, so benchmark the exact
-workload.
+Modes configured in `default` apply to every attention role that has no
+`per_role` entry. A `per_role` spec replaces the whole spec for that role and
+does not inherit `quant` or `skip_softmax` from `default`, so
+`{"backend":"TRTLLM_ATTN"}` is the way to keep a short or sensitive attention
+site dense while the long DiT sequence uses both modes:
+
+```bash
+vllm serve MiniMaxAI/MiniMax-H3 --omni \
+  --diffusion-attention-config '{
+    "default": {
+      "backend": "TRTLLM_ATTN",
+      "quant": {"dtype_qk": "fp8_e4m3", "q_block_size": 1, "k_block_size": 16},
+      "skip_softmax": {"threshold": 0.05, "disabled_until_timestep": 0.97}
+    },
+    "per_role": {
+      "minimax_h3.token_refiner": {"backend": "TRTLLM_ATTN"}
+    }
+  }'
+```
+
+Role names are declared by each model; the
+[attention backend overview](../attention_backends.md#configuration) covers
+the resolution order and the equivalent Python API.
+
+End-to-end speedup depends on the share of step time spent in attention, the
+sequence length, the chosen Q/K precision, and the tile sparsity the input
+actually yields. Benchmark the exact workload rather than extrapolating from
+another model.
