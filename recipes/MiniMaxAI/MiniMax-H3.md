@@ -312,10 +312,10 @@ attention. Both work under the pure Ulysses parallelism of the profile above
 - Skip-Softmax with a direct `threshold=0.05`; the calibrated
   `target_sparsity` control needs ModelOpt metadata that the released H3
   checkpoint does not include. Together with the cutoff below this is a
-  conservative setting:
-  a low threshold skips only clearly negligible tiles, and a cutoff close to
-  `1.0` leaves a substantial dense prefix. Raise `threshold` or lower
-  `disabled_until_timestep` for more speedup once quality is verified.
+  conservative setting: a low threshold skips only clearly negligible tiles,
+  and a cutoff close to `1.0` leaves a substantial dense prefix. Raise
+  `threshold` or lower `disabled_until_timestep` for more speedup once quality
+  is verified.
 - `disabled_until_timestep=0.97` keeps the early high-noise steps dense. The
   gate compares against the video sigma, which H3's default flow shift of 12
   keeps high for much of the run: at 50 steps, `0.99`, `0.97`, and `0.95`
