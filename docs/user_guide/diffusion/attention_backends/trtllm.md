@@ -153,11 +153,6 @@ vllm serve nvidia/Wan2.2-T2V-A14B-Diffusers-FP8 --omni \
     "target_sparsity":0.75,"disabled_until_timestep":0.86}}}'
 ```
 
-`target_sparsity=0.75` with `disabled_until_timestep=0.86` is the
-conservative operating point in NVIDIA's Wan2.2 characterization; raise
-`target_sparsity` or `disabled_until_timestep` from there once quality is
-verified.
-
 ### Timestep gating
 
 The early, high-noise denoising steps fix the global layout of the output, and
