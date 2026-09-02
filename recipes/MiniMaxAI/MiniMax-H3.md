@@ -312,7 +312,7 @@ attention. Both work under the pure Ulysses parallelism of the profile above
 - Skip-Softmax with a direct `threshold=0.05`; the calibrated
   `target_sparsity` control needs ModelOpt metadata that the released H3
   checkpoint does not include. Together with the cutoff below this is a
-  conservative setting: a low threshold skips only clearly negligible tiles,
+  **conservative** setting: a low threshold skips only clearly negligible tiles,
   and a cutoff close to `1.0` leaves a substantial dense prefix. Raise
   `threshold` or lower `disabled_until_timestep` for more speedup once quality
   is verified.
