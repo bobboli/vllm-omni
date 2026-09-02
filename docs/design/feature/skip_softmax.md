@@ -167,9 +167,11 @@ dense_steps = count(t[i] > disabled_until_timestep)
 skip_softmax_steps = N - dense_steps
 ```
 
-This count depends on the schedule, so the same cutoff can gate a very different fraction of the
-run on two models. Flow-shifted rectified-flow schedules are the common case: with a shift `s`
-applied to `N + 1` uniform positions `u` from `1` to `0`,
+This count depends entirely on the schedule, and schedules differ from model to model: the
+scheduler family, the number of steps, and any time shift all change where the steps land in `t`.
+The same cutoff can therefore gate a very different fraction of the run on two models. As one
+example, a flow-shifted rectified-flow schedule applies a shift `s` to `N + 1` uniform positions
+`u` from `1` to `0`,
 
 ```text
 t = s * u / (1 + (s - 1) * u)
@@ -188,6 +190,7 @@ and a large `s` pushes most positions toward `t ≈ 1`. For `N = 49` steps (50 s
 | `0.90` | 28 | 21 |
 | `0.86` | 33 | 16 |
 
-With `s = 3` on the same 49 steps, `t` falls below `0.9` after 13 steps and a cutoff of `0.86`
-leaves 17 dense steps instead of 33. Choose the cutoff by counting against the schedule actually
-served, not by reusing a value from a model with a different shift or step count.
+These numbers hold only for that schedule. A model with a smaller shift, a different step count,
+or a scheduler that is not rectified flow produces a different sequence and a different table.
+Choose the cutoff by counting against the schedule actually served, not by reusing a value from
+another model.
