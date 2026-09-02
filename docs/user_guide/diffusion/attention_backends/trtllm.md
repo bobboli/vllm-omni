@@ -134,7 +134,7 @@ vllm serve <model> --omni \
 
 A fixed `threshold` does not produce a fixed fraction of skipped tiles because
 the score distribution changes with the model, prompt, and shape.
-[NVIDIA ModelOpt](https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/diffusers/sparsity)
+[NVIDIA ModelOpt](https://github.com/NVIDIA/Model-Optimizer)
 can calibrate a per-model curve from sparsity to threshold and store it in the
 checkpoint's transformer `config.json` under `sparse_attention_config`.
 `target_sparsity` selects a point on that curve. The achieved sparsity still
