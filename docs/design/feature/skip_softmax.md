@@ -84,9 +84,10 @@ differ.
 
 ### Skip-Softmax calibration config
 
-[`nvidia/Wan2.2-T2V-A14B-Diffusers-FP8`](https://huggingface.co/nvidia/Wan2.2-T2V-A14B-Diffusers-FP8)
-is a ModelOpt-calibrated checkpoint. Its `transformer/config.json` carries the calibration under
-`sparse_attention_config` (abridged):
+ModelOpt stores the calibration in each transformer component's `config.json` under
+`sparse_attention_config`. The following is taken from the `transformer/config.json` of
+[`nvidia/Wan2.2-T2V-A14B-Diffusers-FP8`](https://huggingface.co/nvidia/Wan2.2-T2V-A14B-Diffusers-FP8),
+with the `ignore` list abridged:
 
 ```json
 {
@@ -108,8 +109,9 @@ is a ModelOpt-calibrated checkpoint. Its `transformer/config.json` carries the c
 }
 ```
 
-`transformer_2/config.json` has the same layout with its own coefficients, since the two experts
-are calibrated separately. vLLM-Omni reads `formula`, `coefficients`, and `ignore`. `ignore` holds
+A checkpoint with several transformer components carries one such config per component, each
+with its own coefficients; in this example, `transformer_2/config.json` holds the low-noise
+expert's curve. vLLM-Omni reads `formula`, `coefficients`, and `ignore`. `ignore` holds
 fnmatch patterns; each is matched against the full module name and against the name relative to
 the transformer component, so `blocks.0.attn1` matches both `transformer.blocks.0.attn1` and
 `transformer_2.blocks.0.attn1`. `targets`, `target_sparsity`, and `disabled_until_timestep` are
