@@ -150,7 +150,7 @@ What vLLM-Omni takes from the checkpoint:
 
 Checkpoint-level `target_sparsity` and `disabled_until_timestep` defaults are
 not consumed; set them in the vLLM-Omni configuration. The
-[feature design](../../../design/feature/skip_softmax.md#calibration-data-flow)
+[feature design](../../../design/feature/skip_softmax.md#skip-softmax-calibration-config)
 documents the checkpoint format and how the coefficients reach the kernel.
 
 To calibrate a checkpoint yourself, follow the

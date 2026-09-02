@@ -83,10 +83,11 @@ so that `s` lands near that fraction of skipped tiles on the calibration data. T
 `a` and `b` come from the checkpoint; the achieved sparsity on another prompt, shape, or layer can
 differ.
 
-### Calibration data flow
+### Skip-Softmax calibration config
 
-Calibration is carried in the transformer's `config.json` under `sparse_attention_config`, in the
-layout NVIDIA ModelOpt writes:
+[`nvidia/Wan2.2-T2V-A14B-Diffusers-FP8`](https://huggingface.co/nvidia/Wan2.2-T2V-A14B-Diffusers-FP8)
+is a ModelOpt-calibrated checkpoint. Its `transformer/config.json` carries the calibration under
+`sparse_attention_config` (abridged):
 
 ```json
 {
@@ -94,20 +95,26 @@ layout NVIDIA ModelOpt writes:
     "config_groups": {
       "group_0": {
         "algorithm": "skip_softmax",
+        "targets": ["WanAttention"],
+        "ignore": ["blocks.0.attn1", "blocks.0.attn2", "blocks.1.attn1", "..."],
         "threshold_scale_factor": {
           "formula": "a * exp(b * target_sparsity)",
-          "coefficients": {"a": 1000.0, "b": 5.0}
+          "coefficients": {"a": 2822.6209952221557, "b": 4.388250623520793}
         },
-        "ignore": ["blocks.0.attn1", "blocks.0.attn2"]
+        "target_sparsity": 0.7,
+        "disabled_until_timestep": 0.93
       }
     }
   }
 }
 ```
 
-`ignore` holds fnmatch patterns; each is matched against the full module name and against the name
-relative to the transformer component, so `blocks.0.attn1` matches both `transformer.blocks.0.attn1`
-and `transformer_2.blocks.0.attn1`. The metadata is consumed in three steps:
+`transformer_2/config.json` has the same layout with its own coefficients, since the two experts
+are calibrated separately. vLLM-Omni reads `formula`, `coefficients`, and `ignore`. `ignore` holds
+fnmatch patterns; each is matched against the full module name and against the name relative to
+the transformer component, so `blocks.0.attn1` matches both `transformer.blocks.0.attn1` and
+`transformer_2.blocks.0.attn1`. `targets`, `target_sparsity`, and `disabled_until_timestep` are
+not consumed. The metadata is consumed in three steps:
 
 1. **Parse.** At config construction, `propagate_skip_softmax_calibration` reads the
    `config_groups` entry whose `algorithm` is `skip_softmax`, extracts `coefficients.a`,
@@ -129,10 +136,6 @@ and `transformer_2.blocks.0.attn1`. The metadata is consumed in three steps:
    from `threshold` or from `(a, b, target_sparsity)`, applies the timestep gate below, and passes
    the result to the kernel. A layer with `target_sparsity` but no stamped coefficients returns
    `None` and runs dense.
-
-Only `a`, `b`, and `ignore` are read from the checkpoint. Checkpoint-level `target_sparsity` and
-`disabled_until_timestep` defaults are not consumed; the user configuration is the single source
-for them.
 
 ## Timestep gating
 
