@@ -52,20 +52,9 @@ Softmax and `PV` work for the tile be skipped, in which case its contribution to
 simply omitted. A larger `λ` makes the test more aggressive. The figure states the same test in
 log space, `m̃ − m < ln(λ)`, which is how the kernel evaluates it.
 
-## What this bounds
-
-Two properties of the test shape the achievable speedup:
-
-- **`QK_j^T` always runs.** The test needs `tile_max`, which comes from the tile's scores, so the
-  score matmul is never skipped — only the Softmax and `PV` work are. The score matmul and the
-  value matmul have the same FLOP count, so even skipping every eligible tile removes roughly half
-  the attention arithmetic; the kernel-level speedup is bounded well under 2×.
-
-- **The decision is per tile, not per key.** A tile is skipped only when it is unimportant for
-  *every* query row in it and *all* of its keys; a single important key in a single row keeps the
-  whole tile. How many tiles qualify
-  depends on the attention scores and rounds down to tile granularity, so no configured value can
-  promise a fixed skip ratio.
+The test needs the tile's scores, so `QK_j^T` always runs and only the Softmax and `PV` work can
+be skipped. Since the two matmuls have the same FLOP count, skipping every eligible tile removes at
+most roughly half of the attention arithmetic, and the kernel-level speedup stays well under 2×.
 
 ## From configuration to the kernel threshold
 

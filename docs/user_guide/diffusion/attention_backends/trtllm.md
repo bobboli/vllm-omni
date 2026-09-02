@@ -98,8 +98,7 @@ Resolved diffusion attention backend 'TRTLLM_ATTN' for role='self' via attention
 Skip-Softmax (BLASST) skips the Softmax and `PV` work of KV tiles whose
 scores fall far below the running row maximum. `QK^T` always runs, and how
 many tiles qualify depends on the input. The
-[feature design](../../../design/feature/skip_softmax.md) gives the skip test
-and its bounds.
+[feature design](../../../design/feature/skip_softmax.md) gives the skip test.
 
 ### Configuration keys
 
