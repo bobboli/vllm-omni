@@ -167,7 +167,7 @@ dense_steps = count(t[i] > disabled_until_timestep)
 skip_softmax_steps = N - dense_steps
 ```
 
-This count depends entirely on the schedule, and schedules differ from model to model: the
+This count **depends on the schedule**, and schedules differ from model to model: the
 scheduler family, the number of steps, and any time shift all change where the steps land in `t`.
 The same cutoff can therefore gate a very different fraction of the run on two models. Take
 MiniMax-H3 as an example. Its video branch uses a flow-shifted rectified-flow schedule that applies
