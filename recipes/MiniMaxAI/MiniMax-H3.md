@@ -319,7 +319,7 @@ attention. Both work under the pure Ulysses parallelism of the profile above
 - `disabled_until_timestep=0.97` keeps the early high-noise steps dense. The
   gate compares against the video sigma, which H3's default flow shift of 12
   keeps high for much of the run: at 50 steps, `0.99`, `0.97`, and `0.95`
-  leave the first 6, 14, and 19 of 49 denoiser evaluations dense. See the
+  leave the first 6, 14, and 19 of 49 denoiser forwards dense. See the
   [Skip-Softmax design](https://github.com/vllm-project/vllm-omni/blob/main/docs/design/feature/skip_softmax.md#timestep-gating)
   for how the cutoff maps to steps.
 - A `per_role` entry that keeps the token refiner, a short attention path,
