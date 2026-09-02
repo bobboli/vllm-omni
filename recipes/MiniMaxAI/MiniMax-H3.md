@@ -307,8 +307,8 @@ DiT attention sequence: SAGE attention quantization and Skip-Softmax sparse
 attention. Both work under the pure Ulysses parallelism of the profile above
 (`--usp 4 --ring 1`). The example below enables both:
 
-- SAGE with `fp8_e4m3` Q/K (B200 additionally supports `int8`); P and V are
-  always FP8 in this kernel.
+- SAGE with `fp8_e4m3` Q/K; P and V are always FP8 in this kernel. B200
+  additionally supports `int8` Q/K, which preserves accuracy better than FP8.
 - Skip-Softmax on the calibration-free path with `threshold=0.05`. The H3
   checkpoint carries no ModelOpt calibration, so `target_sparsity` is not
   available.
