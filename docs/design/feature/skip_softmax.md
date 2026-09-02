@@ -3,9 +3,9 @@
 Skip-Softmax is the sparse-attention mode of the `TRTLLM_ATTN` backend. It implements BLASST
 (Dynamic BLocked Attention Sparsity via Softmax Thresholding,
 [arXiv:2512.12087](https://arxiv.org/abs/2512.12087)), which adds a per-tile skip test to the
-FlashAttention main loop. This page describes the algorithm, how the user configuration is resolved into the value the kernel consumes, and how
-checkpoint calibration and timestep gating participate in that resolution. Configuration keys and
-operating-point guidance are covered in
+FlashAttention main loop. This page describes the algorithm, how the user configuration is resolved
+into the value the kernel consumes, and how checkpoint calibration and timestep gating participate
+in that resolution. Configuration keys and operating-point guidance are covered in
 [TRTLLM Attention](../../user_guide/diffusion/attention_backends/trtllm.md#skip-softmax); the
 backend selection contract is covered in
 [Diffusion Attention Backend Selection](attention_backend_selection.md).
